@@ -1,3 +1,31 @@
+gigactl (1.0.2) noble; urgency=medium
+
+  * The app now starts on a machine that has never run a cairo-drawing GTK
+    application: the package was missing the PyGObject-to-cairo bridge, so
+    GigaControl closed immediately with "Couldn't find foreign struct converter
+    for 'cairo.Context'". Reported in #25.
+
+  * An Embedded Controller that refuses to be written now says so, and says
+    what to do about it. Where fan and backlight commands used to fail with
+    "[Errno 22] Invalid argument" — a kernel refusal reported as though the
+    daemon had rejected it — gigactl now explains that the kernel's EC
+    interface was loaded read-only and gives the command that fixes it.
+    Temperatures and fan speeds keep being reported throughout, because
+    reading was never the part that failed. Reported in #25.
+
+  * A fan profile that is not reaching the hardware no longer looks like one
+    that is. "gfan status" used to announce the chosen profile while the fans
+    sat at whatever the firmware was doing; it now reports the profile and,
+    separately, that nothing is being applied. The app window says the same in
+    its banner, and stops offering controls as though they would work.
+
+  * The hardware support table distinguishes machines verified here from
+    machines users have reported working (#24, #25), and docs/PROTOCOL.md
+    records the unreproduced G5 KF register claims from #24 as open questions
+    rather than findings.
+
+ -- khalil Smairi <smairio98@gmail.com>  Fri, 21 Aug 2026 18:21:30 +0100
+
 gigactl (1.0.1) noble; urgency=low
 
   * Add manual pages for gfan(1), gkbd(1), gigactl-gui(1) and gigactld(8),
