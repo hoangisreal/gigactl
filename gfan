@@ -94,6 +94,9 @@ daemon_status() {
   printf "Fan1 (CPU): duty %3d%%  ~%4d RPM\n" "$T_DUTY1" "$T_RPM1"
   printf "Fan2 (GPU): duty %3d%%  ~%4d RPM\n" "$T_DUTY2" "$T_RPM2"
   echo "Mode: gigactl daemon, profile $profile"
+  # After the numbers, not before: the profile line is what a user came for, and
+  # the warning explains why it is not happening rather than replacing it.
+  warn_if_ec_stuck
 }
 
 # --- direct mode --------------------------------------------------------------

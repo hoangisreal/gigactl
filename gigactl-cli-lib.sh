@@ -72,6 +72,25 @@ call() {
 
 prop() { busctl --system get-property "$BUS" "$OBJ" "$IFACE" "$1" 2>/dev/null; }
 
+# Strip busctl's type prefix and quotes from a string property.
+unquote_s() { local v=${1#s \"}; echo "${v%\"}"; }
+
+warn() { echo "$TOOL: warning: $*" >&2; }
+
+# Say so when the daemon is being told things the Embedded Controller is not
+# doing. EcStatus is empty while writes land and one plain sentence when they do
+# not, so there is nothing to phrase here — the daemon already said it.
+#
+# A daemon too old to know the property fails the read, which is not evidence of
+# a problem: an older daemon is silent, not broken.
+warn_if_ec_stuck() {
+  local status
+  status=$(prop EcStatus) || return 0
+  status=$(unquote_s "$status")
+  [ -n "$status" ] || return 0
+  warn "$status"
+}
+
 # --- direct mode ----------------------------------------------------------------
 
 # Hold the daemon's own EC lock for a whole write-and-verify sequence, so

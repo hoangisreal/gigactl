@@ -65,7 +65,8 @@ def test_status_reads_the_daemon_rather_than_the_hardware(sandbox):
     assert "duty  56%" in result.stdout and "~4000 RPM" in result.stdout
     assert "manual" in result.stdout          # the daemon's own ActiveProfile
     assert sandbox.ec_calls == []
-    assert set(sandbox.properties_read()) == {"Telemetry", "ActiveProfile"}
+    assert set(sandbox.properties_read()) == {"Telemetry", "ActiveProfile",
+                                              "EcStatus"}
 
 
 def test_daemon_mode_needs_no_root(sandbox):
@@ -228,3 +229,37 @@ def test_the_lock_is_the_one_the_daemon_takes():
         body = source_text(tool)
         assert "gigactl-cli-lib.sh" in body, tool
         assert "/run/lock/" not in body, f"{tool} carries its own lock path"
+
+
+# --- telling the truth about an EC that will not budge (#25) -----------------
+
+READ_ONLY = ('s "the kernel\'s EC interface is read-only: the ec_sys module was '
+             "loaded without write support. Reload it with 'sudo modprobe -r "
+             "ec_sys && sudo modprobe ec_sys', or reboot.\"")
+
+
+def test_status_warns_when_the_daemon_cannot_drive_the_ec(sandbox):
+    """#25 read 'Mode: gigactl daemon, profile max' on a machine holding 27%
+    duty, because nothing the daemon wrote was landing and status never said so.
+    The profile is still reported — it is what the user asked for — but it must
+    not be the only thing said."""
+    sandbox.props["EcStatus"] = READ_ONLY
+    result = sandbox.run("gfan", "status", daemon=True)
+    assert result.returncode == 0, result.output
+    assert "manual" in result.stdout, "the chosen profile is still reported"
+    assert "modprobe" in result.output, "and the reason it is not happening"
+
+
+def test_status_says_nothing_extra_when_the_ec_is_healthy(sandbox):
+    result = sandbox.run("gfan", "status", daemon=True)
+    assert "warning" not in result.output.lower()
+    assert "modprobe" not in result.output
+
+
+def test_status_survives_a_daemon_too_old_to_report_ec_status(sandbox):
+    """A packaged CLI can meet a daemon from an earlier install; an unknown
+    property must read as 'nothing to report', not as a failure."""
+    del sandbox.props["EcStatus"]
+    result = sandbox.run("gfan", "status", daemon=True)
+    assert result.returncode == 0, result.output
+    assert "CPU: 61°C" in result.stdout

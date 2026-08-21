@@ -24,10 +24,18 @@ class FakeEc:
     def __init__(self):
         self.writes = []  # (offset, value) in order
         self.regs = {}
+        # Set to a sentence to emulate an EC that reads but will not write —
+        # the read-only ec_sys of #25. None means writes land.
+        self.unwritable = None
+
+    def unwritable_reason(self):
+        return self.unwritable
 
     def write_u8(self, off, val):
-        from gigactld import fans, mailbox
+        from gigactld import ec, fans, mailbox
 
+        if self.unwritable:
+            raise ec.EcNotWritable(self.unwritable)
         self.writes.append((off, val))
         self.regs[off] = val
         if off == mailbox.FCMD and val == fans.DOORBELL:

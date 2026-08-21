@@ -60,7 +60,7 @@ def test_status_reports_what_the_daemon_holds(sandbox):
     # the fake daemon holds R=255 G=128 B=0 at 60%
     assert "R=255" in result.stdout and "G=128" in result.stdout and "B=0" in result.stdout
     assert "60%" in result.stdout
-    assert sandbox.properties_read() == ["KeyboardState"]
+    assert sandbox.properties_read() == ["KeyboardState", "EcStatus"]
     assert sandbox.ec_calls == []
 
 
@@ -191,3 +191,17 @@ def test_a_direct_write_waits_for_whoever_holds_the_ec_lock(sandbox):
     assert result.returncode != 0
     assert "lock" in result.output.lower() or "busy" in result.output.lower()
     assert sandbox.ec_writes == []
+
+
+def test_status_warns_when_the_daemon_cannot_drive_the_ec(sandbox):
+    """The backlight fails the same way the fans do, and for the same reason."""
+    sandbox.props["EcStatus"] = (
+        's "the kernel\'s EC interface is read-only: reload with modprobe."')
+    result = sandbox.run("gkbd", "status", daemon=True)
+    assert result.returncode == 0, result.output
+    assert "modprobe" in result.output
+
+
+def test_status_says_nothing_extra_when_the_ec_is_healthy(sandbox):
+    result = sandbox.run("gkbd", "status", daemon=True)
+    assert "modprobe" not in result.output

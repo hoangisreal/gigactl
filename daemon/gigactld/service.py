@@ -15,7 +15,7 @@ gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
 from . import __version__  # noqa: E402
-from . import authz, curve, fans, keyboard, mailbox, state  # noqa: E402
+from . import authz, curve, ec as ec_mod, fans, keyboard, mailbox, state  # noqa: E402
 from .telemetry import read_telemetry  # noqa: E402
 
 _ERR = "io.github.smairio.gigactl.Error"
@@ -60,6 +60,12 @@ INTROSPECTION_XML = f"""
       <arg name="fan2_duty_pct" type="u"/>
     </signal>
     <property name="DaemonVersion" type="s" access="read"/>
+    <!-- Empty when the Embedded Controller is doing what it is told. Otherwise
+         one plain sentence naming what is wrong and what to do about it, so a
+         client can show it without having to attempt a write to find out. A
+         machine whose EC refuses writes still reports temperatures perfectly
+         (#25), and nothing else on this interface reveals the difference. -->
+    <property name="EcStatus" type="s" access="read"/>
     <property name="ActiveProfile" type="s" access="read"/>
     <!-- The same six numbers as the Telemetry signal, read on demand. The signal
          is for anything that stays running; this is for one-shot readers such as
@@ -214,6 +220,12 @@ class Daemon:
 
     def _on_name_acquired(self, conn, name: str) -> None:
         print(f"gigactld: owning {name} (EC backend: {self.ec.backend.name})", flush=True)
+        # Say it here as well as on the property: a user asking "why is nothing
+        # happening" reaches for systemctl status long before they think to
+        # inspect a D-Bus property.
+        status = self.ec_status()
+        if status:
+            print(f"gigactld: {status}", flush=True)
 
     def _on_name_lost(self, conn, name: str) -> None:
         print(f"gigactld: lost name {name}; is another instance running?", flush=True)
@@ -225,6 +237,8 @@ class Daemon:
             return GLib.Variant("s", __version__)
         if prop == "ActiveProfile":
             return GLib.Variant("s", self.engine.profile)
+        if prop == "EcStatus":
+            return GLib.Variant("s", self.ec_status())
         if prop == "Telemetry":
             try:
                 t = read_telemetry(self.ec)
@@ -239,6 +253,14 @@ class Daemon:
         if prop == "Curves":
             return _curves_variant(self.engine)
         return None
+
+    def ec_status(self) -> str:
+        """Why the EC is not doing as it is told, or "" when it is.
+
+        Asked fresh rather than remembered, so a machine that is fixed while the
+        daemon runs stops complaining on its own.
+        """
+        return self.ec.unwritable_reason() or ""
 
     def _notify_properties(self, **changed: GLib.Variant) -> None:
         """Emit ``PropertiesChanged`` so a running GUI or tray reflects state it
@@ -284,6 +306,11 @@ class Daemon:
                 self._set_keyboard_enabled(sender, params, invocation)
             else:
                 invocation.return_dbus_error(f"{_ERR}.UnknownMethod", method)
+        except ec_mod.EcNotWritable as exc:
+            # A known cause with a known remedy — worth its own error name so a
+            # client can recognise it, and its own message so the user is not
+            # handed a bare errno as they were in #25.
+            invocation.return_dbus_error(f"{_ERR}.EcNotWritable", str(exc))
         except Exception as exc:  # never let an exception escape into GLib
             invocation.return_dbus_error(f"{_ERR}.Failed", str(exc))
 

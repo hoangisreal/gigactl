@@ -135,3 +135,88 @@ def test_set_curve_notifies_curves_and_profile(make_daemon):
     linked, cpu, _gpu = props["Curves"]
     assert linked is True
     assert [tuple(p) for p in cpu] == points
+
+
+# --- EcStatus: is anything we are told actually happening? (#25) -------------
+
+def test_ec_status_is_empty_when_writes_land(make_daemon):
+    """Empty means healthy, so a client can show the property verbatim without
+    first deciding whether it is a message or a state."""
+    assert _get(make_daemon(), "EcStatus").get_string() == ""
+
+
+def test_ec_status_reports_a_read_only_ec(make_daemon):
+    from gigactld import ec
+
+    d = make_daemon()
+    d.ec.unwritable = ec.READ_ONLY_REASON
+    assert "modprobe" in _get(d, "EcStatus").get_string()
+
+
+def test_ec_status_clears_once_the_ec_accepts_writes_again(make_daemon):
+    from gigactld import ec
+
+    d = make_daemon()
+    d.ec.unwritable = ec.READ_ONLY_REASON
+    assert _get(d, "EcStatus").get_string() != ""
+    d.ec.unwritable = None
+    assert _get(d, "EcStatus").get_string() == ""
+
+
+def test_setting_a_duty_on_a_read_only_ec_names_the_cause_and_the_fix(make_daemon):
+    """#25 got '[Errno 22] Invalid argument', which blames the daemon for a
+    kernel refusal and offers nothing to act on."""
+    from gigactld import ec
+
+    d = make_daemon()
+    d.ec.unwritable = ec.READ_ONLY_REASON
+    inv = Invocation()
+    d._method_call(None, ":1.5", None, INTERFACE, "SetFanDuty",
+                   GLib.Variant("(uu)", (0, 70)), inv)
+    assert inv.error is not None, "the call must fail, not silently do nothing"
+    name, message = inv.error
+    assert name.endswith("EcNotWritable"), name
+    assert "modprobe" in message
+    assert "Errno" not in message
+
+
+def test_setting_a_keyboard_colour_on_a_read_only_ec_says_the_same_thing(make_daemon):
+    from gigactld import ec
+
+    d = make_daemon()
+    d.ec.unwritable = ec.READ_ONLY_REASON
+    inv = Invocation()
+    d._method_call(None, ":1.5", None, INTERFACE, "SetKeyboardColor",
+                   GLib.Variant("(uuu)", (255, 0, 0)), inv)
+    assert inv.error is not None
+    assert inv.error[0].endswith("EcNotWritable")
+    assert "modprobe" in inv.error[1]
+
+
+def test_a_read_only_ec_still_serves_telemetry(make_daemon):
+    """The reason to keep the daemon running at all: the temperatures in #25
+    were correct throughout."""
+    from gigactld import ec
+
+    d = make_daemon()
+    d.ec.unwritable = ec.READ_ONLY_REASON
+    d.ec.regs.update({0x07: 71, 0x0A: 64})
+    assert _get(d, "Telemetry").unpack()[:2] == (71, 64)
+
+
+def test_startup_announces_a_read_only_ec(make_daemon, capsys):
+    """Nobody may be watching the bus, but the journal is always there — and
+    'why is nothing happening' is answered fastest by systemctl status."""
+    from gigactld import ec
+
+    d = make_daemon()
+    d.ec.unwritable = ec.READ_ONLY_REASON
+    d._on_name_acquired(None, "io.github.smairio.gigactl")
+    out = capsys.readouterr().out
+    assert "modprobe" in out
+
+
+def test_startup_is_quiet_about_a_healthy_ec(make_daemon, capsys):
+    d = make_daemon()
+    d._on_name_acquired(None, "io.github.smairio.gigactl")
+    assert "modprobe" not in capsys.readouterr().out

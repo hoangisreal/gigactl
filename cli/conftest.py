@@ -40,6 +40,8 @@ DEFAULT_PROPS = {
     "ActiveProfile": 's "manual"',
     "KeyboardState": "(buuuu) true 255 128 0 60",
     "DaemonVersion": 's "1.0.0"',
+    # Empty is healthy: the EC is doing what it is told.
+    "EcStatus": 's ""',
 }
 
 _BUSCTL = r'''#!/usr/bin/python3

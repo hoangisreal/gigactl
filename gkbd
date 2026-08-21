@@ -65,6 +65,7 @@ daemon_status() {
   read -r _type enabled r g b pct <<<"$out"
   [ -n "${pct:-}" ] || die "unexpected keyboard state from the daemon: $out"
   echo "daemon: R=$r G=$g B=$b brightness=${pct}% ($([ "$enabled" = true ] && echo on || echo off))"
+  warn_if_ec_stuck
 }
 
 daemon_apply() {
