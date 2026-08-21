@@ -102,9 +102,21 @@ def unit_values(rel: str, key: str) -> list[str]:
             re.finditer(rf"^{key}=(.*)$", text(rel), re.MULTILINE)]
 
 
+def control_text() -> str:
+    """debian/control as dpkg reads it: comment lines removed.
+
+    Policy 5.1 allows comments in a source package's control file and this one
+    uses them to record why a dependency is there. dpkg strips them when it
+    generates the binary package's control, so no test should be able to see a
+    package name that only ever appeared in prose.
+    """
+    return "\n".join(line for line in text("debian/control").splitlines()
+                     if not line.startswith("#"))
+
+
 def control_field(field: str) -> str:
     """One field of the *binary* package stanza, unwrapped onto a single line."""
-    stanza = text("debian/control").split("\nPackage: ")[1]
+    stanza = control_text().split("\nPackage: ")[1]
     match = re.search(rf"^{field}:(.*?)(?=\n\S|\Z)", stanza, re.MULTILINE | re.DOTALL)
     assert match, f"debian/control's binary stanza has no {field}"
     return " ".join(match.group(1).split())
@@ -227,7 +239,7 @@ def apt_installed() -> set[str]:
 
 def build_depends() -> list[str]:
     """Bare package names from debian/control's Build-Depends."""
-    match = re.search(r"^Build-Depends:(.*?)(?=^\S)", text("debian/control"),
+    match = re.search(r"^Build-Depends:(.*?)(?=^\S)", control_text(),
                       re.MULTILINE | re.DOTALL)
     assert match, "debian/control has no Build-Depends"
     names = []
@@ -236,3 +248,58 @@ def build_depends() -> list[str]:
         if entry:
             names.append(entry.split()[0].split(":")[0])
     return names
+
+
+# --- what the shipped code actually needs at runtime -------------------------
+#
+# The Depends field used to be checked against a hand-written list, so it could
+# only catch a dependency somebody remembered to add — which is how a GTK app
+# drawing with cairo shipped without the PyGObject cairo bridge and died on
+# every draw callback (#25). These readers derive the requirement from the code
+# the package installs instead, so a new import has to be declared or explained.
+
+def shipped_python_modules() -> list[Path]:
+    """Every .py file the package installs, as paths in the source tree."""
+    return sorted(ROOT / source for path, source in installed_files().items()
+                  if path.endswith(".py"))
+
+
+def _first_party() -> set[str]:
+    """Module names that resolve inside the package itself, not to a dependency."""
+    names = set(PACKAGE_DIRS)
+    for module in shipped_python_modules():
+        names.add(module.stem)
+    return names
+
+
+def third_party_imports() -> set[str]:
+    """Top-level module names the shipped code imports from outside itself.
+
+    Relative imports are internal by definition. Absolute ones are checked
+    against the standard library and the package's own modules, so what is left
+    is exactly the set that has to come from a Debian package.
+    """
+    external = set()
+    for module in shipped_python_modules():
+        tree = ast.parse(module.read_text(), filename=str(module))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                external.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+                external.add(node.module.split(".")[0])
+    import sys
+    return external - sys.stdlib_module_names - _first_party()
+
+
+def required_gi_namespaces() -> set[tuple[str, str]]:
+    """(namespace, version) pairs the shipped code pins with gi.require_version.
+
+    A namespace has to be present before ``from gi.repository import X`` works,
+    and each comes from its own gir1.2-* package — so pinning one is a runtime
+    dependency in exactly the way an import is.
+    """
+    pairs = set()
+    for module in shipped_python_modules():
+        pairs.update(re.findall(r'require_version\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)',
+                                module.read_text()))
+    return pairs

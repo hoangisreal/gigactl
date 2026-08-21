@@ -21,9 +21,10 @@ from pathlib import Path
 
 import pytest
 from conftest import (BUILT_BY_RULES, PACKAGE_DIRS, ROOT, changelog_version,
-                      control_field, desktop_entry, icon_sizes, install_lines,
+                      control_field, control_text, desktop_entry, icon_sizes, install_lines,
                       installed_files, launcher_programs, private_dir,
-                      pyproject_scripts, rules_variable, text, unit_values)
+                      pyproject_scripts, required_gi_namespaces, rules_variable,
+                      text, third_party_imports, unit_values)
 
 DESKTOP_ENTRIES = ["gui/data/io.github.smairio.gigactl.desktop",
                    "gui/data/gigactl-tray.desktop"]
@@ -202,25 +203,90 @@ def test_the_symbolic_icon_is_monochrome():
 
 # --- control / changelog ----------------------------------------------------
 
-@pytest.mark.parametrize("dependency", ["python3-gi", "gir1.2-gtk-4.0",
-                                        "gir1.2-adw-1", "${python3:Depends}",
-                                        "${misc:Depends}",
-                                        # busctl: the CLIs refuse to touch the EC
-                                        # when they cannot ask the bus about the
-                                        # daemon, so it must always be there
-                                        "systemd"])
-def test_runtime_dependencies_are_declared(dependency):
+# What provides each third-party import on Debian and Ubuntu.
+#
+# cairo maps to python3-gi-cairo, not to python3-cairo which also provides the
+# module: a GTK app needs the *bridge* between PyGObject and cairo, and without
+# it the import succeeds while every draw callback dies with "Couldn't find
+# foreign struct converter for 'cairo.Context'" (#25). python3-gi-cairo depends
+# on python3-cairo, so naming it covers both halves.
+IMPORT_PACKAGES = {
+    "gi": "python3-gi",
+    "cairo": "python3-gi-cairo",
+}
+
+# GI namespaces do not map to package names mechanically: Gdk-4.0 ships inside
+# the Gtk package, and Gio-2.0 comes from glib's.
+NAMESPACE_PACKAGES = {
+    ("Gtk", "4.0"): "gir1.2-gtk-4.0",
+    ("Gdk", "4.0"): "gir1.2-gtk-4.0",
+    ("Adw", "1"): "gir1.2-adw-1",
+    ("Gio", "2.0"): "gir1.2-glib-2.0",
+}
+
+# Dependencies no import can reveal, each earning its place for a reason of its
+# own rather than because some module names it.
+INFRASTRUCTURE_DEPENDENCIES = [
+    "${python3:Depends}",
+    "${misc:Depends}",
+    # busctl: the CLIs refuse to touch the EC when they cannot ask the bus about
+    # the daemon, so it must always be there
+    "systemd",
+]
+
+
+def test_every_third_party_import_has_a_known_debian_package():
+    """A new dependency must be declared or explained, never silently ignored.
+
+    The check below can only assert what it can name, so an unmapped import
+    would slip through it unnoticed — which is the failure this whole pair of
+    tests exists to prevent.
+    """
+    unmapped = third_party_imports() - set(IMPORT_PACKAGES)
+    assert not unmapped, f"add these to IMPORT_PACKAGES: {sorted(unmapped)}"
+
+
+def test_every_required_gi_namespace_has_a_known_debian_package():
+    unmapped = required_gi_namespaces() - set(NAMESPACE_PACKAGES)
+    assert not unmapped, f"add these to NAMESPACE_PACKAGES: {sorted(unmapped)}"
+
+
+def test_every_third_party_import_is_declared():
+    """Derived from the code, not from memory: an allowlist can only catch the
+    dependency somebody thought to add, which is how #25 shipped."""
+    depends = control_field("Depends")
+    for module in sorted(third_party_imports()):
+        package = IMPORT_PACKAGES.get(module)
+        if package is None:
+            continue  # reported by the mapping test above
+        assert package in depends, f"import {module} needs Depends: {package}"
+
+
+def test_every_required_gi_namespace_is_declared():
+    """This suite runs offline with no apt, so it cannot resolve a transitive
+    dependency — and a package should name what it uses directly regardless."""
+    depends = control_field("Depends")
+    for namespace, version in sorted(required_gi_namespaces()):
+        package = NAMESPACE_PACKAGES.get((namespace, version))
+        if package is None:
+            continue  # reported by the mapping test above
+        assert package in depends, \
+            f"gi.require_version({namespace!r}, {version!r}) needs Depends: {package}"
+
+
+@pytest.mark.parametrize("dependency", INFRASTRUCTURE_DEPENDENCIES)
+def test_infrastructure_dependencies_are_declared(dependency):
     assert dependency in control_field("Depends")
 
 
 def test_nothing_depends_on_a_package_apt_cannot_resolve():
     """nbfc-linux (ec_probe) is GitHub-only: a dep on it makes the .deb
     uninstallable from a plain apt run."""
-    assert "nbfc" not in text("debian/control")
+    assert "nbfc" not in control_text()
 
 
 def test_build_depends_cover_what_rules_actually_runs():
-    build = text("debian/control")
+    build = control_text()
     for tool, package in [("rsvg-convert", "librsvg2-bin"),
                           ("dh_python3", "dh-python"),
                           ("desktop-file-validate", "desktop-file-utils")]:
