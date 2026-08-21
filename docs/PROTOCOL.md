@@ -97,6 +97,52 @@ Zones 1/2 (`FDAT=0x04/0x05`) and the "all zones" variant (`0x07`) exist for 3-zo
 | `0x52` | BIOS features 1 (bit `0x00400000` = 3-zone RGB class, `0x40000000` = white-only) |
 | `0x3D` | white/single brightness readback |
 
+## Open questions (reported elsewhere, not reproduced here)
+
+Everything above this section was verified on the G6 KF. What follows are
+claims from *other* machines that have not been reproduced here — recorded so
+they are not lost, and kept apart from the register tables so they cannot be
+mistaken for findings. **No code follows any of them.** The value of this
+document is that it separates what was proven on hardware from what was
+guessed; folding an unverified third-party report into the tables above would
+destroy exactly that.
+
+### Are the fan duty registers swapped on the G5 KF?
+
+[#24](https://github.com/smairio/gigactl/issues/24) reports that `DUT1`/`DUT2`
+are reversed on a G5 KF — `0xCF` for the CPU fan and `0xCE` for the GPU fan,
+the opposite of the mapping above.
+
+The report is not self-consistent: it states the swap in one section and then
+restates the original mapping with an instruction to verify it, and the same
+issue says the stock build drives that machine correctly. Two explanations fit
+the evidence given, and nothing in it separates them:
+
+- the registers really are reversed in that firmware, or
+- the registers are identical and the two **fans** are the other way round in
+  that chassis, so the fan this project calls "CPU" is the one cooling the GPU.
+
+The fixes are opposite. The first is a register-map change; the second is no
+code change at all.
+
+**What would settle it:** drive one fan alone to a distinctive duty — fan 1 to
+80%, say — and then read *both* `0xCE` and `0xCF`. If the register the command
+did not target is the one that moved, the mapping is reversed. If the expected
+register moved but the wrong fan audibly spun up, the register map is right and
+the physical labelling differs.
+
+### Does the fan command need four parameters?
+
+The same report describes the `0xC1` fan command as requiring `FBF1` set to a
+duplicate of the duty byte and `FBF2` set to `0x03`, where this project sends
+the duty alone.
+
+The one-parameter form is proven on the G6 KF, and the same reporter says the
+unmodified build drives their fans — so the extra bytes may simply be inert
+padding copied from a driver that sets both fans in a single call. The EC
+ignores leftover scratch bytes, which would make both forms work and neither
+observation wrong. Untested here.
+
 ## Dead ends (so you don't repeat them)
 
 - The DSDT's `0xC4`-family fan commands (fixed mode `0x0D/0x0E`, duty subregs `0x03/0x04`, mode presets `0x07–0x0B`) are **ignored** by this EC firmware — legacy Insyde reference code. Fans use `0xC1` only. (`0xC4` sub `0x0C` — the keyboard master enable — is the one live member of that family.)

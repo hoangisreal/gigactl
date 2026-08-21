@@ -21,9 +21,22 @@ serialising on the same lock the daemon uses. And when they *cannot tell* — no
 
 | Model | Status |
 |-------|--------|
-| Gigabyte **G6 KF** (i7-13620H / RTX 4060) | ✅ Verified |
-| Gigabyte G5 KF / KF5 / MF, G6 MF (same Clevo platform) | 🟢 Expected to work — untested, please report! |
-| Other Gigabyte laptops | ❌ Refused by the built-in model guard |
+| Gigabyte **G6 KF** (i7-13620H / RTX 4060) | ✅ Verified — built and measured on this machine |
+| Gigabyte **G5 KF** | 👍 Reported working by a user ([#24](https://github.com/smairio/gigactl/issues/24)) |
+| Gigabyte **G5 MF5** | 👍 Reported working by a user ([#25](https://github.com/smairio/gigactl/issues/25)) |
+| Other Gigabyte G5 / G6 / G7 (same Clevo platform) | 🟢 Expected to work — untested, please report! |
+| Any other Gigabyte laptop | ❌ Refused by the built-in model guard |
+
+**✅ and 👍 are deliberately not the same claim.** ✅ means it was run and
+measured here. 👍 means somebody else ran it on their own machine and said it
+worked — real evidence, and the only kind obtainable for hardware nobody here
+owns, but not a substitute for having tested it. Nothing outside the G6 KF has
+been verified by the maintainer, and the table will never say otherwise.
+
+There is a second report on the G5 MF5 that looked like a hardware failure and
+was not: the kernel's EC interface had been loaded read-only, so every reading
+was correct and every command was refused. `gfan` and the app now say that in
+words, and name the command that fixes it, instead of reporting an errno.
 
 Both tools check your DMI vendor/model before writing anything, and `gfan` verifies the EC actually obeyed each command — if it didn't, it automatically reverts to firmware control. Untested-but-same-family models are allowed with a notice; anything else is refused (override with `GFAN_UNSAFE=1` / `GKBD_UNSAFE=1` at your own risk).
 
