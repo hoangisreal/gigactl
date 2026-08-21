@@ -117,6 +117,11 @@ class Daemon:
         # so a fan-only user's backlight is never touched.
         self.keyboard: keyboard.KeyboardState | None = None
         self.state_path = state.DEFAULT_PATH
+        # Why the engine's last attempt to drive the fans came to nothing, and
+        # the status last announced — kept so a condition repeating every two
+        # seconds is reported once rather than every tick.
+        self._engine_fault: str | None = None
+        self._last_ec_status = ""
 
     # --- lifecycle -----------------------------------------------------------
     def run(self) -> None:
@@ -260,7 +265,25 @@ class Daemon:
         Asked fresh rather than remembered, so a machine that is fixed while the
         daemon runs stops complaining on its own.
         """
-        return self.ec.unwritable_reason() or ""
+        # A read-only EC outranks a generic write failure: both are true at
+        # once when the module lacks write support, and only one of them tells
+        # the user what to do about it.
+        return self.ec.unwritable_reason() or self._engine_fault or ""
+
+    def _sync_ec_status(self) -> None:
+        """Log and announce the EC status, but only when it changes.
+
+        A fault that persists is not news on every tick; a transition is. The
+        announcement matters as much as the log — a window is often open while
+        this happens, and should not need restarting to notice.
+        """
+        status = self.ec_status()
+        if status == self._last_ec_status:
+            return
+        self._last_ec_status = status
+        print(f"gigactld: {status}" if status
+              else "gigactld: the EC is accepting writes again", flush=True)
+        self._notify_properties(EcStatus=GLib.Variant("s", status))
 
     def _notify_properties(self, **changed: GLib.Variant) -> None:
         """Emit ``PropertiesChanged`` so a running GUI or tray reflects state it
@@ -391,17 +414,37 @@ class Daemon:
                      t.fan1_duty_pct, t.fan2_duty_pct),
                 ),
             )
-            self._run_engine(t.cpu_temp, t.gpu_temp)
+            self._run_engine(t.cpu_temp, t.gpu_temp, quiet=True)
         except Exception as exc:
             print(f"gigactld: tick failed: {exc}", flush=True)
+        self._sync_ec_status()
         return True  # keep the timeout running
 
-    def _run_engine(self, cpu_temp: int, gpu_temp: int) -> None:
+    def _run_engine(self, cpu_temp: int, gpu_temp: int, *,
+                    quiet: bool = False) -> None:
+        """Drive each fan the engine has an opinion about.
+
+        ``quiet`` is for the periodic tick, which must not die on a failure it
+        will meet again in two seconds — the fault is recorded and reported
+        through ``EcStatus`` instead. A caller acting on a user's request wants
+        the exception, so that the request can fail out loud rather than report
+        success it did not achieve.
+        """
         for fan in fans.FANS:
             src = cpu_temp if fan == fans.CPU_FAN else gpu_temp
             duty = self.engine.decide(fan, src, cpu_temp)
-            if duty is not None:
+            if duty is None:
+                continue
+            try:
                 fans.set_duty(self.ec, fan, duty)
+            except Exception as exc:
+                self._engine_fault = (
+                    f"the fan profile '{self.engine.profile}' is not being "
+                    f"applied: {exc}")
+                if not quiet:
+                    raise
+                return
+        self._engine_fault = None
 
     def _apply_now(self) -> None:
         t = read_telemetry(self.ec)

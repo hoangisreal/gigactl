@@ -27,6 +27,10 @@ class FakeEc:
         # Set to a sentence to emulate an EC that reads but will not write —
         # the read-only ec_sys of #25. None means writes land.
         self.unwritable = None
+        # Set to an exception to emulate a write that fails for a reason we
+        # could not have known in advance — as opposed to `unwritable`, which
+        # is the gate we can read before trying.
+        self.write_error = None
 
     def unwritable_reason(self):
         return self.unwritable
@@ -36,6 +40,8 @@ class FakeEc:
 
         if self.unwritable:
             raise ec.EcNotWritable(self.unwritable)
+        if self.write_error:
+            raise self.write_error
         self.writes.append((off, val))
         self.regs[off] = val
         if off == mailbox.FCMD and val == fans.DOORBELL:
