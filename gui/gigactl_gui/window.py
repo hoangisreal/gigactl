@@ -31,6 +31,7 @@ from . import palette, profiles, temperature  # noqa: E402
 from .client import DaemonClient, Telemetry  # noqa: E402
 from .curve_page import CurvePage  # noqa: E402
 from .gauge import TempGauge  # noqa: E402
+from .banner import banner as banner_for
 from .model import Model, Support  # noqa: E402
 from .preview import KeyboardPreview  # noqa: E402
 
@@ -127,20 +128,29 @@ class OverviewWindow(Adw.ApplicationWindow):
 
     # --- construction --------------------------------------------------------
     def _build_banner(self, model: Model) -> Gtk.Box:
-        icon = {
-            Support.VERIFIED: "emblem-ok-symbolic",
-            Support.EXPECTED: "dialog-warning-symbolic",
-            Support.UNSUPPORTED: "dialog-error-symbolic",
-        }[model.support]
+        """The banner box, kept so it can be re-stated without a restart: what
+        it says depends on the EC, which can break and be fixed while the window
+        is open."""
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         box.add_css_class("verbar")
-        box.add_css_class(model.support.value)  # "verified" / "expected" / "unsupported"
-        box.append(Gtk.Image.new_from_icon_name(icon))
-        text = model.banner
-        if model.support is Support.UNSUPPORTED:
-            text += " — controls are switched off to keep it safe."
-        box.append(Gtk.Label(label=text, xalign=0.0, wrap=True))
+        self._banner_box = box
+        self._banner_icon = Gtk.Image()
+        self._banner_label = Gtk.Label(xalign=0.0, wrap=True)
+        box.append(self._banner_icon)
+        box.append(self._banner_label)
+        self._banner_tone = None
+        self._update_banner()
         return box
+
+    def _update_banner(self) -> None:
+        state = banner_for(self._model, self._client.ec_status())
+        if state.tone is not self._banner_tone:
+            if self._banner_tone is not None:
+                self._banner_box.remove_css_class(self._banner_tone.css_class)
+            self._banner_box.add_css_class(state.tone.css_class)
+            self._banner_tone = state.tone
+        self._banner_icon.set_from_icon_name(state.icon)
+        self._banner_label.set_label(state.text)
 
     def _build_hero(self) -> Gtk.Box:
         self._cpu_gauge = TempGauge("CPU")
@@ -408,6 +418,9 @@ class OverviewWindow(Adw.ApplicationWindow):
         """Pull the authoritative state back out of the daemon's properties."""
         self._syncing = True
         try:
+            # The EC can start refusing writes, or start accepting them again,
+            # while the window is open; the banner is how the user finds out.
+            self._update_banner()
             profile = self._client.active_profile() or self._last_profile
             if profile:
                 self._last_profile = profile

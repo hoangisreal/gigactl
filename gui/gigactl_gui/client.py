@@ -157,6 +157,19 @@ class DaemonClient:
         v = self._proxy.get_cached_property("ActiveProfile")
         return v.get_string() if v is not None else None
 
+    def ec_status(self) -> str:
+        """The daemon's sentence about why the EC is not doing as it is told,
+        or "" when it is.
+
+        Empty for a daemon that has never heard of the property, too: an
+        install can be older than the app talking to it, and silence there
+        means nothing to report rather than something to announce.
+        """
+        if not self._proxy:
+            return ""
+        v = self._proxy.get_cached_property("EcStatus")
+        return v.get_string() if v is not None else ""
+
     def curves(self) -> CurveSnapshot | None:
         if not self._proxy:
             return None

@@ -95,3 +95,16 @@ def test_unknown_error_falls_back_to_its_detail():
 @pytest.mark.parametrize("raw", ["", "no colons here", "GDBus.Error:bare.Name:"])
 def test_unparseable_errors_still_produce_something(raw):
     assert errors.human_message(raw)
+
+
+def test_a_blocked_ec_reaches_the_user_with_the_daemon_s_own_instruction():
+    """errors.py maps the daemon's error names to short sentences, but this one
+    already arrives phrased for a beginner and naming the fix — substituting a
+    tidier apology would drop the one useful part."""
+    raw = ("GDBus.Error:io.github.smairio.gigactl.Error.EcNotWritable: "
+           "the kernel's EC interface is read-only: the ec_sys module was "
+           "loaded without write support. Reload it with 'sudo modprobe -r "
+           "ec_sys && sudo modprobe ec_sys', or reboot.")
+    message = errors.human_message(raw)
+    assert "modprobe" in message
+    assert message != errors._GENERIC

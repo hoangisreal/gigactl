@@ -73,3 +73,39 @@ def test_control_call_without_daemon_reports_not_running(action):
     seen = _errors_from(action)
     assert seen, "a control call with no daemon must surface an error"
     assert "not running" in seen[0].lower()
+
+
+# --- EcStatus (#25) ---------------------------------------------------------
+
+class _FakeProxy:
+    def __init__(self, props):
+        self._props = props
+
+    def get_cached_property(self, name):
+        return self._props.get(name)
+
+
+def _client_with(props):
+    c = DaemonClient()
+    c._proxy = _FakeProxy(props)
+    return c
+
+
+def test_ec_status_reads_the_property():
+    import gi
+
+    gi.require_version("Gio", "2.0")
+    from gi.repository import GLib
+
+    c = _client_with({"EcStatus": GLib.Variant("s", "read-only, run modprobe")})
+    assert c.ec_status() == "read-only, run modprobe"
+
+
+def test_ec_status_is_empty_without_a_daemon():
+    assert DaemonClient().ec_status() == ""
+
+
+def test_ec_status_is_empty_against_a_daemon_too_old_to_have_it():
+    """An install can be older than the app talking to it; a missing property
+    means nothing to report, not a problem to announce."""
+    assert _client_with({}).ec_status() == ""
