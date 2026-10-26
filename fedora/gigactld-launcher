@@ -1,0 +1,25 @@
+#!/usr/bin/python3 -I
+"""Fedora's daemon-only, isolated entry point (not the GUI launcher).
+
+Only this root-owned file receives gigactld_exec_t. No setuid bit, capabilities
+or user-domain transition grants a caller root privileges; D-Bus/polkit is the
+unprivileged control interface. The daemon also enforces its own root/model
+guards for source and other packaged entry points.
+"""
+import os
+import sys
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        print("gigactld: must run as root; use the D-Bus interface for control",
+              file=sys.stderr)
+        return 1
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, "/usr/lib/gigactl")
+    from gigactld.__main__ import main as daemon_main
+    return daemon_main()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

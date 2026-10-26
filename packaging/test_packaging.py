@@ -101,14 +101,11 @@ def test_unit_commands_are_binaries_the_package_installs(key):
         assert binary.lstrip("/") in installed, binary
 
 
-def test_the_unit_loads_ec_sys_before_starting():
-    """The daemon chooses its EC backend once, at startup, and modules-load.d only
-    fires at boot — so without this the first run after an install comes up on the
-    /dev/port fallback that races the kernel's own EC driver, and stays there."""
-    values = unit_values(UNIT, "ExecStartPre")
-    assert any(re.match(r"-?/s?bin/modprobe ec_sys", v) for v in values), values
-    assert all(v.startswith("-") for v in values), \
-        "a kernel without ec_sys must not stop the daemon from starting"
+def test_the_unit_has_no_hardware_helper_before_the_daemon_guard():
+    """Only the guarded daemon may open hardware; no automatic module loads."""
+    assert not unit_values(UNIT, "ExecStartPre")
+    assert "modprobe" not in "\n".join(
+        line for line in text(UNIT).splitlines() if not line.startswith("#"))
 
 
 def test_the_unit_ships_where_packages_ship_units():

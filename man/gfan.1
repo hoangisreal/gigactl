@@ -1,4 +1,4 @@
-.TH GFAN 1 "2026-08-21" "gigactl 1.1.0" "User Commands"
+.TH GFAN 1 "2026-08-21" "gigactl 1.2.0" "User Commands"
 .SH NAME
 gfan \- control the fans on Gigabyte G5/G6 laptops
 .SH SYNOPSIS
@@ -40,7 +40,9 @@ and no chance of the two interleaving controller commands. polkit lets the user
 of the active local session do this without a password.
 .TP
 .B direct
-No daemon is running, so
+No daemon is running. Direct writes require explicit
+.B GIGACTL_ALLOW_DIRECT=1
+and the controller lifetime lease; they are not the default recovery strategy.
 .B gfan
 drives the controller itself and re\-runs itself under
 .BR sudo (8)
@@ -67,8 +69,8 @@ mode. This is the default when no argument is given.
 Print the same status every two seconds until interrupted.
 .TP
 .B auto
-Hand both fans back to the laptop firmware's own curve. A reboot does this too,
-so no experiment can leave the fans stuck.
+Request firmware-auto independently for both fans. A transport failure can
+prevent handback; command acknowledgement is not physical ownership evidence.
 .TP
 .B max
 Run both fans at 100%.
@@ -81,9 +83,9 @@ Run fan 1 at the first duty cycle and fan 2 at the second.
 .SH OPTIONS
 .TP
 .B \-\-force
-Allow a duty cycle below 30% while the CPU is at or above 85 \(deC. Without it
-such a request is refused, because slowing the fans down on an already hot
-machine is the one combination that can cause damage rather than noise.
+Legacy syntax only; it must not bypass thermal protection. Software control
+uses a 30% floor at 70 \(deC and 100% emergency requests at CPU 95 \(deC or GPU
+87 \(deC. These are software policy thresholds, not measured firmware limits.
 .TP
 .BR \-h ", " \-\-help
 Print usage and exit.
@@ -94,13 +96,20 @@ cycle, a controller that did not accept the write, a lock held by another
 writer, or a daemon whose presence could not be determined.
 .SH ENVIRONMENT
 .TP
-.B GFAN_UNSAFE
-Set to
-.B 1
-to skip the vendor and model check. The Embedded Controller protocol was
-reverse engineered on a Gigabyte G6 KF; on hardware from another ODM the same
-registers can mean anything at all, so overriding this risks the machine.
+.B GIGACTL_ALLOW_DIRECT
+Set to 1 only for explicitly reviewed standalone writes. Unknown bus ownership
+and controller lease contention still refuse access. Raw EC access may race the
+kernel even for reads; userspace locking does not remove that risk.
+.PP
+There is no environment override for the vendor/model/BIOS write guard: writes
+require a GIGABYTE G5 GE on BIOS FB06 or a GIGABYTE G6 KF, the same allowlist
+the privileged daemon enforces. Reads are not model-gated but still hold the
+controller lease.
 .SH FILES
+.TP
+.I /run/gigactl/owner.lock
+Lifetime controller lease, held before the mailbox lock. A running daemon
+retains it; direct clients recheck D-Bus ownership after acquiring it.
 .TP
 .I /run/gfan.mode
 The manual duty cycle last set in direct mode, reported by
@@ -114,15 +123,18 @@ Serialises Embedded Controller access between
 and
 .BR gigactld (8).
 .SH NOTES
-Verified on the Gigabyte G6 KF. Other G5, G6 and G7 models are expected to
-work \(em they are the same Clevo\-ODM platform \(em and print a notice saying
-they are untested. Anything else is refused.
+Verified on the Gigabyte G6 KF and the G5 GE on BIOS FB06. Writes to any
+other model \(em including other G5, G6 and G7 variants \(em are refused:
+hardware similarity is not evidence. A GPU temperature of 0 means the GPU
+sensor is unavailable or asleep; it is ignored by the thermal guard rather
+than treated as a fatal failure, while CPU data is always required.
 .PP
 In direct mode every duty cycle is read back after writing. If the controller
 does not converge on the requested value,
 .B gfan
-hands the fans to the firmware and reports what happened, rather than leaving
-them somewhere unintended. In daemon mode the daemon performs the same check.
+attempts firmware recovery and reports failures. The daemon reconciles targets
+against readback with bounded ramp deadlines; pending targets are not reported
+as verified. New safety behavior is fake-tested, not hardware-validated.
 .SH SEE ALSO
 .BR gkbd (1),
 .BR gigactl-gui (1),

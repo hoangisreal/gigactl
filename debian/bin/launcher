@@ -29,6 +29,13 @@ def main() -> int:
         print(f"{invoked}: not a gigactl entry point — expected one of "
               f"{', '.join(sorted(PROGRAMS))}", file=sys.stderr)
         return 2
+    if package == "gigactld" and os.geteuid() != 0:
+        # Same pre-check as fedora/gigactld-launcher: fail before importing the
+        # privileged package; the daemon re-checks root/model itself anyway.
+        # The GUI entry point is deliberately unprivileged and skips this.
+        print("gigactld: must run as root; use the D-Bus interface for control",
+              file=sys.stderr)
+        return 1
     sys.path.insert(0, PRIVATE_DIR)
     return import_module(f"{package}.__main__").main()
 

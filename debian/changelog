@@ -1,10 +1,35 @@
+gigactl (1.2.0) noble; urgency=medium
+
+  * Privileged safety foundation (M1, software-tested, not hardware-
+    validated): lifetime controller lease, exact DMI allowlist (GIGABYTE
+    G5 GE / BIOS FB06, G6 KF by model), explicit opt-in raw EC transport,
+    thermal supervision of manual and curve modes, requested-vs-observed
+    duty reconciliation with bounded ramps, independent per-fan firmware
+    handback with pending retry, async polkit with superseded-request
+    invalidation, control-loop watchdog, and suspend/resume reconciliation
+    with validated saved-state restore.
+  * CLI write guards mirror the daemon allowlist exactly; thermal guard
+    treats an unavailable GPU like the daemon does.
+  * GUI: a tray host that registers after the --tray grace timer hides
+    the fallback window again; fan requests are serialized per owner and
+    curves keep firmware-escape and thermal safety.
+  * Fedora: dedicated gigactld_t SELinux domain replacing the broad init_t
+    module, isolated root-only daemon launcher, hardened unit (systemd
+    watchdog, runtime directory with preserved owner lock, start limits),
+    and clean-committed-source RPM builds that refuse dirty trees.
+  * Release validation: daemon/GUI/CLI/packaging suites green; RPM built
+    from a clean tree, installed and upgrade-tested on Fedora 44.
+
+ -- gigactl contributors <gigactl@example.invalid>  Mon, 26 Oct 2026 20:47:46 +0700
+
 gigactl (1.1.0) noble; urgency=medium
 
   * Gigabyte G5 GE verified on hardware (fans and single-zone RGB,
     BIOS FB06): both fans driven and handed back, keyboard colour set.
-  * Fedora package (fedora/gigactl.spec): the daemon uses the /dev/port
-    EC backend there with a shipped SELinux policy module, because
-    Fedora kernels build the EC without the ec_sys debugfs interface.
+  * Fedora package (fedora/gigactl.spec): ships a SELinux policy module,
+    because Fedora kernels build the EC without the ec_sys debugfs
+    interface. Without ec_sys the daemon fails closed; raw /dev/port
+    access requires an explicit administrator opt-in.
   * CPU turbo boost toggle in the app (intel_pstate no_turbo), with a
     dedicated polkit action; the daemon reports the live sysfs state.
   * Daemon failsafe: repeated tick failures now hand the fans back to

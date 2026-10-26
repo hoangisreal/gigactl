@@ -1,4 +1,4 @@
-.TH GIGACTLD 8 "2026-08-21" "gigactl 1.1.0" "System Administration"
+.TH GIGACTLD 8 "2026-08-21" "gigactl 1.2.0" "System Administration"
 .SH NAME
 gigactld \- GigaControl daemon for Gigabyte G5/G6 fan and keyboard control
 .SH SYNOPSIS
@@ -44,18 +44,26 @@ systemctl status gigactl.service
 .B \-\-interval \fIseconds\fR
 How often to read the controller, publish telemetry and apply the fan curve.
 Defaults to 2 seconds.
+Accepted intervals are 1, 2 or 3 seconds.
 .TP
 .B \-\-restore-firmware
-Hand both fans back to the laptop firmware's own curve and exit immediately. The
-unit runs this after the main process stops, including after a crash, so the fans
-can never be left frozen at a stale manual duty cycle.
+Independently request firmware-auto for both fans with bounded retries and exit.
+The unit invokes this independent helper after the old process exits, including
+after a crash. Failures return a nonzero status; recovery is not guaranteed.
+.TP
+.B \-\-allow-raw-ec
+Experimental explicit opt-in to raw port transactions. This does not establish
+kernel arbitration or hardware safety. The same opt-in is needed by recovery.
 .SH EMBEDDED CONTROLLER ACCESS
-Two backends, chosen at startup. Preferred is the
+The verified-platform guard accepts G5 GE with BIOS FB06 and the historically
+verified G6 KF model. Missing/other identity is refused at the privileged boundary.
+Preferred transport is the
 .B ec_sys
 debugfs interface, where the kernel's own driver performs and serialises each
-transaction. The fallback is raw port I/O through
+transaction. Raw port I/O through
 .IR /dev/port ,
-which races the kernel driver and is used only when the module is unavailable.
+is refused by default and requires explicit experimental opt-in. It races the
+kernel driver even for reads. No automatic bypass of read-only ec_sys occurs.
 .PP
 The package therefore loads
 .B ec_sys
@@ -87,6 +95,14 @@ Properties:
 .B KeyboardState
 and
 .BR Curves .
+Additional status properties include
+.BR FanControlState ,
+.BR TelemetryStatus ,
+.BR TurboAvailable
+and
+.BR TurboBoost .
+Telemetry getters use the last valid control-loop sample and expire it after
+six seconds; they never trigger arbitrary new EC transactions.
 Reading is unrestricted; every method is gated by polkit.
 .PP
 .RS
@@ -95,6 +111,10 @@ busctl introspect io.github.smairio.gigactl /io/github/smairio/gigactl
 .EE
 .RE
 .SH FILES
+.TP
+.I /run/gigactl/owner.lock
+Exclusive process-lifetime controller lease, retained through cleanup. Hardware
+control starts only after acquiring both this lease and the D-Bus service name.
 .TP
 .I /var/lib/gigactl/state.json
 The saved fan profile, custom curves and keyboard state, restored at startup.
@@ -125,8 +145,10 @@ Exits 1 if the Embedded Controller cannot be opened, and 0 on a clean shutdown o
 after
 .BR \-\-restore-firmware .
 .SH NOTES
-If the daemon is stopped, the fans return to firmware control rather than
-staying where it left them. Recovering by hand, should it ever be needed:
+Stopping the daemon attempts firmware recovery. SIGKILL cannot run Python
+cleanup; systemd stop-post is independent. An event-loop watchdog detects hangs,
+but a blocked kernel or inaccessible EC may still prevent recovery. A manual
+recovery request (subject to platform/backend/ownership gates) is:
 .PP
 .RS
 .EX

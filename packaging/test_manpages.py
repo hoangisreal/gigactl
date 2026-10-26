@@ -141,11 +141,13 @@ def test_every_option_the_entry_point_accepts_is_documented(tool, source):
 
 
 @pytest.mark.parametrize("tool", ["gfan", "gkbd"])
-def test_the_hardware_override_is_documented(tool):
-    """The one environment variable a user is genuinely meant to reach for; the
-    others exist for the test suite and are deliberately not advertised."""
+def test_no_hardware_guard_override_is_documented_or_implemented(tool):
+    """Writes mirror the daemon's exact platform allowlist. There is no
+    UNSAFE environment bypass to document, and the man page must not
+    advertise one the tool no longer honours."""
     page, _section = DOCUMENTED[tool]
-    assert f"{tool.upper()}_UNSAFE" in text(page)
+    assert f"{tool.upper()}_UNSAFE" not in text(tool)
+    assert "no environment override" in text(page)
     assert ".SH ENVIRONMENT" in text(page)
 
 

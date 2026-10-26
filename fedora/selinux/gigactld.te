@@ -1,0 +1,86 @@
+policy_module(gigactld, 1.2.0)
+
+# Dedicated root daemon domain, adapted from pr/fedora-packaging. In particular,
+# do not grant /dev/port access to init_t or label the shared GUI launcher as an
+# entry point. Unix credentials, D-Bus policy and polkit remain separate gates.
+type gigactld_t;
+type gigactld_exec_t;
+dbus_system_domain(gigactld_t, gigactld_exec_t)
+
+type gigactld_var_lib_t;
+files_type(gigactld_var_lib_t)
+
+type gigactld_var_run_t;
+files_pid_file(gigactld_var_run_t)
+
+type gigactld_lock_t;
+files_lock_file(gigactld_lock_t)
+
+require {
+    type init_var_run_t;
+    type policykit_t;
+    type sysfs_t;
+    type systemd_logind_t;
+    type unconfined_t;
+    class dbus { send_msg acquire_svc };
+}
+
+# Python/interpreter and root-owned private modules are read/execute-only.
+corecmd_exec_bin(gigactld_t)
+libs_exec_lib_files(gigactld_t)
+files_read_usr_files(gigactld_t)
+allow gigactld_t self:fifo_file rw_fifo_file_perms;
+allow gigactld_t self:unix_stream_socket create_stream_socket_perms;
+auth_read_passwd(gigactld_t)
+logging_send_syslog_msg(gigactld_t)
+
+# Fedora uses /dev/port. Stock memory_device_t also covers other raw memory
+# devices: this is a type-level permission, not proof of per-port confinement.
+# Only gigactld_t receives it, never every systemd service or an unprivileged UI.
+dev_read_raw_memory(gigactld_t)
+dev_write_raw_memory(gigactld_t)
+# DMI model guard and telemetry are read-only. The stock sysfs_t write grant is
+# needed by intel_pstate/no_turbo; SELinux does not constrain it to that one path.
+# The daemon's model/root guards and explicit knob path remain essential.
+dev_read_sysfs(gigactld_t)
+allow gigactld_t sysfs_t:file { open getattr write };
+
+# Atomic JSON state replacement needs directory/file management.
+files_search_var_lib(gigactld_t)
+files_var_lib_filetrans(gigactld_t, gigactld_var_lib_t, dir, "gigactl")
+manage_dirs_pattern(gigactld_t, gigactld_var_lib_t, gigactld_var_lib_t)
+manage_files_pattern(gigactld_t, gigactld_var_lib_t, gigactld_var_lib_t)
+
+# Lifetime owner lock. systemd labels RuntimeDirectory using the .fc rule;
+# root CLI recovery can create the same directory when the service is stopped.
+# Do not unlink owner.lock: its inode must survive restarts and recovery.
+files_search_pids(gigactld_t)
+files_pid_filetrans(gigactld_t, gigactld_var_run_t, dir, "gigactl")
+# A root CLI in Fedora's usual unconfined domain may be the first creator,
+# before systemd ever creates RuntimeDirectory. Give that exact basename the
+# same label, not generic var_run_t; DAC still forbids unprivileged creation.
+files_pid_filetrans(unconfined_t, gigactld_var_run_t, dir, "gigactl")
+allow gigactld_t gigactld_var_run_t:dir { create getattr search open read write add_name };
+allow gigactld_t gigactld_var_run_t:file { create getattr open read write lock setattr };
+
+# Separate, existing mailbox transaction lock shared with direct CLI fallback.
+files_lock_filetrans(gigactld_t, gigactld_lock_t, file, "gigactl-ec.lock")
+files_lock_filetrans(unconfined_t, gigactld_lock_t, file, "gigactl-ec.lock")
+allow gigactld_t gigactld_lock_t:file { create getattr open read write lock setattr };
+
+# Nonblocking sd_notify datagrams from the main GLib loop. Abstract sockets need
+# sendto; filesystem sockets additionally need parent search / sock_file write.
+allow gigactld_t self:unix_dgram_socket create_socket_perms;
+init_dgram_send(gigactld_t)
+allow gigactld_t init_var_run_t:dir search;
+allow gigactld_t init_var_run_t:sock_file write;
+
+# Bus-name ownership and pairwise communication. No user domain gets hardware
+# permissions or a privileged transition as a consequence of these send rules.
+dbus_system_bus_client(gigactld_t)
+allow gigactld_t policykit_t:dbus send_msg;
+allow policykit_t gigactld_t:dbus send_msg;
+allow gigactld_t systemd_logind_t:dbus send_msg;
+allow systemd_logind_t gigactld_t:dbus send_msg;
+allow gigactld_t unconfined_t:dbus send_msg;
+allow unconfined_t gigactld_t:dbus send_msg;
