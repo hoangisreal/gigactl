@@ -14,6 +14,9 @@ BusName=io.github.smairio.gigactl
 # kernel without the module still starts the daemon. write_support=1 comes from
 # modprobe.d/gigactl.conf.
 ExecStartPre=-/sbin/modprobe ec_sys
+# The daemon must never write bytecode into its system module tree
+# (read-only in its SELinux domain, and root-owned on Debian alike).
+Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/gigactld
 Restart=on-failure
 RestartSec=2

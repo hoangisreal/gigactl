@@ -1,0 +1,3 @@
+/usr/lib/gigactl/launcher	gen_context(system_u:object_r:gigactld_exec_t,s0)
+/var/lib/gigactl(/.*)?		gen_context(system_u:object_r:gigactld_var_lib_t,s0)
+/run/lock/gigactl-ec\.lock	gen_context(system_u:object_r:gigactld_var_run_t,s0)

@@ -5,7 +5,7 @@
 # backend there and the modprobe/modules-load files would be inert.
 Name:           gigactl
 Version:        1.0.2
-Release:        1%{?dist}
+Release:        4%{?dist}
 Summary:        Fan and RGB keyboard control for Gigabyte G5/G6 laptops
 License:        MIT
 URL:            https://github.com/smairio/gigactl
@@ -14,8 +14,7 @@ BuildArch:      noarch
 
 BuildRequires:  desktop-file-utils
 BuildRequires:  systemd-rpm-macros
-BuildRequires:  checkpolicy
-BuildRequires:  policycoreutils
+BuildRequires:  selinux-policy-devel
 
 Requires:       python3-gobject
 Requires:       python3-cairo
@@ -39,8 +38,9 @@ writes through polkit. Verified on Gigabyte G6 KF.
 %build
 # Icons ship as SVG only (the Debian build rasterises with rsvg-convert;
 # scalable + symbolic SVG is what KDE/GNOME render from anyway).
-checkmodule -M -m -o gigactl-devport.mod fedora/selinux/gigactl-devport.te
-semodule_package -o gigactl-devport.pp -m gigactl-devport.mod
+# Dedicated daemon domain (least privilege); see fedora/selinux/gigactld.te
+cp fedora/selinux/gigactld.te fedora/selinux/gigactld.fc .
+make -f /usr/share/selinux/devel/Makefile gigactld.pp
 
 %install
 PRIV=%{buildroot}%{_prefix}/lib/gigactl
@@ -67,8 +67,9 @@ install -d %{buildroot}%{_datadir}/icons/hicolor/scalable/apps \
            %{buildroot}%{_datadir}/icons/hicolor/symbolic/apps
 install -pm 0644 design/icon.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/io.github.smairio.gigactl.svg
 install -pm 0644 design/icon-symbolic.svg %{buildroot}%{_datadir}/icons/hicolor/symbolic/apps/io.github.smairio.gigactl-symbolic.svg
+install -d %{buildroot}/var/lib/gigactl
 install -d %{buildroot}%{_datadir}/selinux/packages
-install -pm 0644 gigactl-devport.pp %{buildroot}%{_datadir}/selinux/packages/
+install -pm 0644 gigactld.pp %{buildroot}%{_datadir}/selinux/packages/
 install -d %{buildroot}%{_mandir}/man1 %{buildroot}%{_mandir}/man8
 install -pm 0644 man/gfan.1 man/gkbd.1 man/gigactl-gui.1 %{buildroot}%{_mandir}/man1/
 install -pm 0644 man/gigactld.8 %{buildroot}%{_mandir}/man8/
@@ -78,8 +79,12 @@ desktop-file-validate gui/data/*.desktop
 
 %post
 %systemd_post gigactl.service
-# Load before the daemon (re)starts so its first /dev/port open lands.
-semodule -i %{_datadir}/selinux/packages/gigactl-devport.pp 2>/dev/null || :
+# Load before the daemon (re)starts so its first /dev/port open lands,
+# drop the earlier broad init_t module if an older build installed it,
+# and label the entry point / state directory for the new domain.
+semodule -r gigactl-devport 2>/dev/null || :
+semodule -i %{_datadir}/selinux/packages/gigactld.pp 2>/dev/null || :
+restorecon -RF /usr/lib/gigactl/launcher /var/lib/gigactl /run/lock/gigactl-ec.lock 2>/dev/null || :
 
 %preun
 %systemd_preun gigactl.service
@@ -87,7 +92,7 @@ semodule -i %{_datadir}/selinux/packages/gigactl-devport.pp 2>/dev/null || :
 %postun
 %systemd_postun_with_restart gigactl.service
 if [ $1 -eq 0 ]; then
-  semodule -r gigactl-devport 2>/dev/null || :
+  semodule -r gigactld 2>/dev/null || :
 fi
 
 %files
@@ -98,8 +103,9 @@ fi
 %{_bindir}/gkbd
 %{_bindir}/gigactld
 %{_bindir}/gigactl-gui
+%dir /var/lib/gigactl
 %{_unitdir}/gigactl.service
-%{_datadir}/selinux/packages/gigactl-devport.pp
+%{_datadir}/selinux/packages/gigactld.pp
 %{_datadir}/dbus-1/system.d/io.github.smairio.gigactl.conf
 %{_datadir}/polkit-1/actions/io.github.smairio.gigactl.policy
 %{_datadir}/applications/io.github.smairio.gigactl.desktop
@@ -112,5 +118,5 @@ fi
 
 %changelog
 * Mon Oct 26 2026 gigactl contributors - 1.0.2-1
-- Fedora package. Daemon uses the /dev/port EC backend (Fedora kernels
-  ship no ec_sys debugfs), with a shipped SELinux policy module.
+- Fedora RPM packaging. Daemon uses the /dev/port EC backend (Fedora
+  kernels ship no ec_sys debugfs) under a dedicated SELinux domain.

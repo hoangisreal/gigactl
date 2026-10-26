@@ -1,0 +1,78 @@
+policy_module(gigactld, 1.0.0)
+
+########################################
+#
+# Dedicated least-privilege domain for the gigactl daemon, replacing
+# the broad init_t /dev/port rule (gigactl-devport) shipped before.
+# gigactld runs as root under systemd (Type=dbus) and needs exactly:
+#   * /dev/port (memory_device_t) for the EC on Fedora kernels, which
+#     ship no ec_sys debugfs;
+#   * its state file under /var/lib/gigactl and its EC lock file;
+#   * the intel_pstate no_turbo sysfs knob (read/write);
+#   * the system D-Bus (own name, polkit checks, logind sleep signal,
+#     calls from the unprivileged GUI/CLI user domain).
+# Nothing else: no network, no home access, no other devices.
+#
+
+type gigactld_t;
+type gigactld_exec_t;
+dbus_system_domain(gigactld_t, gigactld_exec_t)
+
+type gigactld_var_lib_t;
+files_type(gigactld_var_lib_t)
+
+type gigactld_var_run_t;
+files_type(gigactld_var_run_t)
+
+require {
+	type policykit_t;
+	type var_lock_t;
+	type sysfs_t;
+	type systemd_logind_t;
+	type unconfined_t;
+	class dbus { send_msg acquire_svc };
+}
+
+# --- entry point / interpreter -------------------------------------
+# The launcher is a python script; the domain must be able to run the
+# interpreter and read the private module tree (usr_t by default).
+corecmd_exec_bin(gigactld_t)
+libs_exec_lib_files(gigactld_t)
+allow gigactld_t self:process { signal sigkill sigstop signull };
+allow gigactld_t self:capability { dac_override dac_read_search sys_rawio };
+allow gigactld_t self:fifo_file rw_fifo_file_perms;
+allow gigactld_t self:unix_stream_socket create_stream_socket_perms;
+
+# --- EC and CPU knobs ----------------------------------------------
+dev_read_raw_memory(gigactld_t)
+dev_write_raw_memory(gigactld_t)
+allow gigactld_t sysfs_t:file { read write open getattr ioctl lock };
+
+# --- own state and lock ---------------------------------------------
+allow gigactld_t var_lib_t:dir { search write add_name };
+type_transition gigactld_t var_lib_t:dir gigactld_var_lib_t "gigactl";
+files_var_lib_filetrans(gigactld_t, gigactld_var_lib_t, dir)
+manage_dirs_pattern(gigactld_t, gigactld_var_lib_t, gigactld_var_lib_t)
+manage_files_pattern(gigactld_t, gigactld_var_lib_t, gigactld_var_lib_t)
+allow gigactld_t gigactld_var_lib_t:file { lock };
+
+allow gigactld_t var_lock_t:dir { search write add_name };
+type_transition gigactld_t var_lock_t:file gigactld_var_run_t "gigactl-ec.lock";
+manage_files_pattern(gigactld_t, gigactld_var_run_t, gigactld_var_run_t)
+allow gigactld_t gigactld_var_run_t:file { lock };
+
+logging_send_syslog_msg(gigactld_t)
+# Short-lived invocations (e.g. --restore-firmware) resolve the user
+# database through GLib; /etc/passwd is world-readable by design.
+auth_read_passwd(gigactld_t)
+
+# --- D-Bus peers ------------------------------------------------------
+# dbus_system_domain covers owning the bus name; message exchange with
+# the concrete peers is checked pairwise by the broker.
+dbus_system_bus_client(gigactld_t)
+allow gigactld_t policykit_t:dbus send_msg;
+allow policykit_t gigactld_t:dbus send_msg;
+allow gigactld_t systemd_logind_t:dbus send_msg;
+allow systemd_logind_t gigactld_t:dbus send_msg;
+allow gigactld_t unconfined_t:dbus send_msg;
+allow unconfined_t gigactld_t:dbus send_msg;
