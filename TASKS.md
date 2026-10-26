@@ -27,8 +27,8 @@ are not a new implementation's hardware acceptance.
 | M4.01 | Audit native Clevo ACPI/WMI backend initialization/serialization | Research | No | No | Loading a driver is not passive discovery |
 | M4.02 | Reuse RGB effects/idle UX with privacy + EC I/O-budget review | Research | No | No | Upstream PR #35 is not automatically accepted |
 | M4.03 | Optional power/charge controls only through verified capabilities | No | No | No | Requires separate hardware authorization |
-| M5.01 | Dedicated SELinux domain; safe committed-source RPM builds | Yes | Yes | No | `packaging/test_fedora.py` (source contracts + stub-rpmbuild clean-source tests); dirty tree is refused by design, so no RPM from the current uncommitted tree. No package installation |
-| M5.02 | Isolated install/upgrade/erase and Plasma/niri validation | No | No | No | Dedicated VM/session evidence required |
+| M5.01 | Dedicated SELinux domain; safe committed-source RPM builds | Yes | Yes | No | `packaging/test_fedora.py` (source contracts + stub-rpmbuild clean-source tests). 1.2.0: RPM built from a clean tree, then installed/upgraded/erased/reinstalled on the dev machine (G5 GE/FB06, Fedora 44, niri): %pre refusal while active, fail-closed without raw opt-in, confined gigactld_t run with profile restore and live telemetry, tray hidden, no new AVC denials. See `fedora/RPMS/BUILD-1.2.0.txt`. Not hardware acceptance of M1 behavior |
+| M5.02 | Isolated install/upgrade/erase and Plasma/niri validation | No | No | No | Dev-machine (non-isolated) niri-session evidence done for 1.2.0 (see M5.01); dedicated VM evidence and Debian install still required |
 | M6.01 | Reproducible benchmark methodology | Documented | No | No | `docs/BENCHMARKING.md` |
 | M6.02 | Approved repeated CPU/GPU/combined sustained measurements | No | No | No | No new performance claim |
 
