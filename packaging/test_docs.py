@@ -15,11 +15,11 @@ from conftest import text
 MODEL_SOURCE = "gui/gigactl_gui/model.py"
 
 
-def _verified_model() -> str:
-    """The one machine the code treats as proven, read from the code."""
-    match = re.search(r'VERIFIED_MODEL = "([^"]+)"', text(MODEL_SOURCE))
-    assert match, f"{MODEL_SOURCE} should declare VERIFIED_MODEL"
-    return match.group(1)
+def _verified_models() -> set[str]:
+    """The machines the code treats as proven, read from the code."""
+    match = re.search(r'VERIFIED_MODELS = \(([^)]+)\)', text(MODEL_SOURCE))
+    assert match, f"{MODEL_SOURCE} should declare VERIFIED_MODELS"
+    return set(re.findall(r'"([^"]+)"', match.group(1)))
 
 
 def _support_rows() -> list[str]:
@@ -35,8 +35,13 @@ def test_the_readme_verifies_exactly_the_machine_the_code_verifies():
     difference between "we proved this" and "someone told us" is the whole
     honesty of the table — and it is one edit away from being lost.
     """
-    verified = _verified_model()
+    verified = _verified_models()
     claimed = [row for row in _support_rows() if "Verified" in row]
-    assert len(claimed) == 1, f"exactly one row may claim verification: {claimed}"
-    assert verified in claimed[0], \
-        f"README verifies {claimed[0]!r}, the code verifies {verified!r}"
+    # The README may claim exactly the machines the code verifies — no
+    # more (PRODUCT.md #3), and no fewer (a proven machine left at
+    # "expected" undersells what was measured).
+    assert len(claimed) == len(verified), \
+        f"README claims {len(claimed)} verified rows, code verifies {verified}"
+    for model in verified:
+        assert any(model in row for row in claimed), \
+            f"README does not verify {model!r}, the code does"
