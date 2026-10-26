@@ -1,3 +1,20 @@
+gigactl (1.1.0) noble; urgency=medium
+
+  * Gigabyte G5 GE verified on hardware (fans and single-zone RGB,
+    BIOS FB06): both fans driven and handed back, keyboard colour set.
+  * Fedora package (fedora/gigactl.spec): the daemon uses the /dev/port
+    EC backend there with a shipped SELinux policy module, because
+    Fedora kernels build the EC without the ec_sys debugfs interface.
+  * CPU turbo boost toggle in the app (intel_pstate no_turbo), with a
+    dedicated polkit action; the daemon reports the live sysfs state.
+  * Daemon failsafe: repeated tick failures now hand the fans back to
+    firmware instead of leaving a stale manual duty in place.
+  * Known issue: tuned profiles carrying boost=0 (e.g. tuned-ppd power
+    profile switches, AC/battery transitions) can turn turbo back off
+    after the app turned it on; the app shows the live state.
+
+ -- gigactl contributors <gigactl@example.invalid>  Mon, 26 Oct 2026 10:00:00 +0700
+
 gigactl (1.0.2) noble; urgency=medium
 
   * The app now starts on a machine that has never run a cairo-drawing GTK

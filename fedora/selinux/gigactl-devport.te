@@ -1,0 +1,21 @@
+module gigactl-devport 1.0;
+
+# gigactld runs as a stock systemd service (init_t) and, on Fedora —
+# whose kernel ships no ec_sys debugfs — must reach the EC through
+# /dev/port (memory_device_t). Stock policy denies init_t write there
+# (audit: avc denied { write } comm="gigactld" name="port").
+#
+# This is deliberately the narrow rule audit2allow derives from that
+# denial, not a dedicated daemon domain: a proper gigactld_t transition
+# also has to re-grant D-Bus system-bus name ownership and polkit
+# traffic, and is tracked as follow-up hardening in SAFETY.md. Every
+# init_t process is already a root system service, and /dev/port itself
+# is root:kmem 0660.
+
+require {
+	type init_t;
+	type memory_device_t;
+	class chr_file { read write open ioctl getattr };
+}
+
+allow init_t memory_device_t:chr_file { read write open ioctl getattr };
