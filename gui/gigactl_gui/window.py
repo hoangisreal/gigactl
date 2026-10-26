@@ -92,6 +92,8 @@ class OverviewWindow(Adw.ApplicationWindow):
         content.append(Gtk.Separator())
         content.append(self._build_profiles())
         content.append(Gtk.Separator())
+        content.append(self._build_turbo())
+        content.append(Gtk.Separator())
         content.append(self._build_keyboard())
 
         clamp = Adw.Clamp(maximum_size=820, child=content)
@@ -267,6 +269,29 @@ class OverviewWindow(Adw.ApplicationWindow):
         box.append(escape)
         return box
 
+    def _build_turbo(self) -> Gtk.Box:
+        self._turbo_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self._turbo_switch.set_tooltip_text(
+            "Allow the CPU to boost above its base clock")
+        self._turbo_switch.connect("notify::active", self._on_turbo_toggled)
+        self._controls.append(self._turbo_switch)
+        self._turbo_note = Gtk.Label(xalign=1.0, hexpand=True,
+                                     halign=Gtk.Align.END)
+        self._turbo_note.add_css_class("metric-sub")
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        header.append(_section_title("CPU turbo boost"))
+        header.append(self._turbo_note)
+        header.append(self._turbo_switch)
+        hint = Gtk.Label(
+            label="Off caps the CPU at base clock — cooler and quieter, "
+                  "slower in short bursts.",
+            xalign=0.0, wrap=True)
+        hint.add_css_class("metric-sub")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.append(header)
+        box.append(hint)
+        return box
+
     def _build_keyboard(self) -> Gtk.Box:
         self._switch = Gtk.Switch(valign=Gtk.Align.CENTER)
         self._switch.set_tooltip_text("Turn the keyboard backlight on or off")
@@ -363,6 +388,11 @@ class OverviewWindow(Adw.ApplicationWindow):
         self._curve_page.sync_from_daemon()
         self._nav.push_by_tag("curve")
 
+    def _on_turbo_toggled(self, switch: Gtk.Switch, _param) -> None:
+        if self._syncing:
+            return
+        self._client.set_turbo_boost(switch.get_active())
+
     def _on_switch_toggled(self, switch: Gtk.Switch, _param) -> None:
         if self._syncing:
             return
@@ -441,6 +471,15 @@ class OverviewWindow(Adw.ApplicationWindow):
                 else:
                     self._custom_button.remove_css_class("chosen")
             self._curve_page.sync_from_daemon()
+            turbo = self._client.turbo_state()
+            if turbo is not None:
+                available, enabled = turbo
+                self._turbo_switch.set_active(enabled)
+                self._turbo_switch.set_sensitive(
+                    available and self._client.available
+                    and self._model.support is not Support.UNSUPPORTED)
+                self._turbo_note.set_text(
+                    "" if available else "not available on this CPU")
             keyboard = self._client.keyboard_state()
             if keyboard:
                 self._switch.set_active(keyboard.enabled)
