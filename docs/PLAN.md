@@ -1,9 +1,11 @@
 # PLAN — gigactl thành Linux Control Center cho Gigabyte G5 GE (Fedora KDE)
 
-> Kế hoạch của fork (đã duyệt và đang thực thi từ 2026-10-26). Trạng thái:
-> Phase 0–2 và 4 đã xong trên máy thật; Phase 3 (power write) chưa làm;
-> Phase 5 mới xong arm CPU. Chi tiết task và trạng thái ở cuối file.
-> Đích: thay thế Gigabyte Control Center trên **một model duy nhất — G5 GE** — bằng cách mở rộng gigactl hiện có. Không rewrite, không project mới.
+> **Historical pre-M1 plan, superseded.** The canonical roadmap is now
+> [../PLAN.md](../PLAN.md), with atomic status/evidence in
+> [../TASKS.md](../TASKS.md). The historical completion labels below do **not**
+> establish M1 hardware acceptance, crash/hang recovery or sustained performance.
+> In particular, the old automatic raw-port and PL1-bound assumptions were
+> corrected in [../RESEARCH.md](../RESEARCH.md). Retained for historical context.
 
 ## Goal
 

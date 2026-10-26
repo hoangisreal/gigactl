@@ -3,6 +3,13 @@
 Reverse-engineered on a **Gigabyte G6 KF** (i7-13620H, RTX 4060), Ubuntu 24.04, July 2026.
 Everything below was verified live on hardware unless marked otherwise.
 
+**Scope:** these are historical protocol observations, not hardware acceptance
+of the M1 implementation. See [../COMPATIBILITY.md](../COMPATIBILITY.md).
+Raw EC reads issue command/address I/O transactions even without intentionally
+setting EC RAM. Userspace locks do not synchronize them with the kernel driver.
+FCMD clearing acknowledges consumption; duty readback and physical firmware
+ownership are separate facts. New recovery/hang behavior is fake-tested only.
+
 ## The platform
 
 Despite the Gigabyte branding, the G5/G6 series are **Clevo ODM designs**:

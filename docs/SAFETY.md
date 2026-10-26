@@ -1,37 +1,81 @@
-# SAFETY — Risk assessment, validation gates, fallback, rollback
+# Safety requirements and approval gates
 
-> Nguyên tắc gốc: trạng thái an toàn luôn là **firmware-auto**. Mọi thử nghiệm phải quay về đó được trong một thao tác, kể cả khi phần mềm chết.
+**Source changes are not authorization to operate hardware.** This development
+run uses fake EC/sysfs/D-Bus devices and does not install, restart or replace the
+running controller. No power setter, driver load or benchmark is authorized.
 
-## Rủi ro chính
+## Boundary and ownership
 
-| # | Rủi ro | Mức | Giảm thiểu |
-|---|---|---|---|
-| S1 | Ghi EC register chưa verify trên G5 GE → quạt dừng/sai phía | Cao | Không bật ghi trước gate G2. **Lưu ý: bản hiện tại đã cho phép ghi trên mọi `G5*`** (`gfan` model guard chỉ cảnh báo "untested") — vì vậy Phase 0 cấm chạy `gfan/gkbd`/daemon ở chế độ ghi trên GE, chỉ dùng probe đọc-thuần; việc siết guard theo model là task tiền đề của Phase 1 |
-| S2 | Hai writer cùng ghi mailbox EC (daemon + CLI trực tiếp) | Trung bình | Giữ cơ chế hiện tại: daemon là chủ duy nhất, flock chung, CLI từ chối khi không chắc trạng thái bus |
-| S3 | `ec_sys` nạp read-only → đọc đúng, ghi bị từ chối âm thầm | Trung bình | Đã xử lý ở bản hiện tại (báo rõ lý do + lệnh sửa); giữ nguyên, thêm vào checklist cài Fedora |
-| S4 | Curve quá thấp ở nhiệt cao → throttle/hư hại lâu dài | Cao | Sàn an toàn hiện có: <30% bị từ chối khi CPU ≥85°C; mở rộng: PWM >0 trên 70°C, 100% ở crit−5°C |
-| S5 | Daemon chết khi đang manual → quạt kẹt ở duty thấp | Cao | Watchdog T2.1 revert-to-auto; reboot luôn reset EC (đã đúng thiết kế) |
-| S6 | Ghi power limit ngoài khoảng → driver/firmware từ chối hoặc mất ổn định | Trung bình | Chỉ ghi trong `[min,max]` hệ thống báo, verify-read-back, sai khôi phục giá trị cũ; không persist qua reboot ở đợt đầu |
-| S7 | Cố undervolt khi BIOS khóa (Plundervolt) | Trung bình | Không có đường ghi MSR 0x150; chỉ hiển thị trạng thái khóa (T3.4) |
-| S8 | DKMS out-of-tree (nếu dùng tuxedo) + Secure Boot trên Fedora | Trung bình | Không dùng làm nền tảng (quyết định D2); chỉ là phương án nghiên cứu đối chiếu |
-| S9 | Suy diễn model: áp kết quả G6 KF/G5 KF cho GE | Cao | Model guard + nhãn Verified/Reported tách bạch; GE chỉ lên Verified qua Phase 1 |
+- Check exact verified vendor/model/BIOS at the privileged EC boundary, including
+  recovery tools and stop-post. Unsupported or unreadable identity fails closed.
+  The allowlist is exactly: GIGABYTE G5 GE pinned to BIOS FB06, and GIGABYTE
+  G6 KF by model only — no G6 KF BIOS version was recorded in the evidence, so
+  that model's BIOS coverage is an explicit known limitation, not a claim.
+- Acquire the lifetime controller lease before creating a real EC, and retain
+  it through recovery. Mailbox locking is a different, shorter-lived lock.
+- Begin service control only after owning the D-Bus name; recheck ownership and
+  suspend state after asynchronous authorization. Invalidate superseded fan work.
+- Raw-port access requires explicit opt-in. Its reads send I/O protocol commands;
+  userspace locks cannot arbitrate them against the kernel ACPI EC driver.
+  No amount of plausible readback is proof that this race is eliminated.
+- Never overwrite a busy mailbox; bound locks, transport waits and FCMD
+  consumption acknowledgement. Do not mask invalid offsets/values into range.
 
-## Validation gates (không qua = dừng, không ghi đè)
+## Thermal and fan state
 
-- **G1 Probe:** chỉ đọc; temp/RPM phải hợp lý ở idle và khi tải nhẹ.
-- **G2 Phân biệt quạt:** đặt fan1=80%, đọc cả `0xCE` và `0xCF` và xác nhận quạt vật lý. Register không đích thay đổi → map đảo; register đúng nhưng quạt sai phía → nhãn vật lý khác. Hai kết luận cho hai cách sửa ngược nhau — không được đoán.
-- **G3 Soak/watchdog:** 30 phút tải, kill daemon giữa chừng, rút cảm biến giả lập; mọi đường đều kết thúc firmware-auto, nhiệt < crit−5°C.
-- **G4 Cài đặt Fedora:** cài/gỡ RPM sạch, qua reboot + suspend/resume.
-- **G5 Benchmark:** cùng bài test/môi trường, ≥3 lượt, công bố kèm throttle reasons.
+- Firmware mode yields to hardware. All **software-controlled** modes, including
+  manual duty, must remain thermally supervised on subsequent samples.
+- Conservative software policy: at least 30% at 70°C, emergency requests of
+  100% at CPU 95°C or GPU 87°C. These are policy thresholds, not discovered
+  firmware critical limits or proof of physical cooling effectiveness.
+- Invalid CPU/GPU data cannot justify low duty. GPU zero means unavailable or
+  asleep, not zero degrees; use valid CPU data conservatively for cooling.
+- A requested duty is not an applied duty. Readback is reconciled even when
+  temperature/hysteresis would otherwise suppress another write. Ramps have
+  progress and absolute deadlines; retries never extend deadlines forever.
+- Two physical fan writes are **not atomic**. On failure, stop the software
+  policy and independently request firmware-auto for both fans. A failure on
+  one fan must not prevent trying the other.
+- Failed handback stays pending and is retried. “Command acknowledged” is not a
+  measured physical mode. Never report “handed back” after swallowing errors.
+- Recovery stays latched until an explicit valid fan request; profile, curve and
+  manual entrypoints all re-arm consistently. Persist the latch when possible.
 
-## Nợ hardening đã biết
+## Lifecycle
 
-- SELinux: gói Fedora hiện nạp rule tối thiểu cho mọi `init_t` ghi `/dev/port` (`fedora/selinux/gigactl-devport.te`). Domain riêng `gigactld_t` là hướng đúng nhưng phải re-grant D-Bus/polkit trên máy Fedora thật — chưa làm, không suy đoán.
-- Turbo vs tuned: tuned profile `boost=0` có thể ghi sau gigactl khi đổi profile điện — xem HARDWARE.md §2. Daemon đọc live state nên không báo sai, nhưng không tự giành lại.
+- A heartbeat on the **control event loop**, not a worker thread, allows systemd
+  to detect a blocked controller. EC/lock/polkit operations have separate bounds.
+- SIGKILL cannot execute Python cleanup. systemd stop-post is an independent
+  best-effort recovery path after the old process/lease exits. Process/lease and
+  fake-supervisor tests are not a real hardware watchdog test.
+- Before suspend, request handback; stop polling/control while suspended. On
+  resume invalidate old applied-state caches and require fresh sensor data.
+  Transient manual duty must not silently resume.
+- Validate the entire saved snapshot before optional keyboard/turbo writes;
+  schedule safety before restoration. Unrelated saves must not turn transient
+  manual state into a durable fan policy.
+- A kernel/firmware failure, inaccessible EC, power loss or failed recovery
+  process can prevent restoration. Reboot is not an unconditional safety proof.
 
-## Fallback & rollback
+## Confinement and packaging
 
-- **Runtime:** một lệnh `gfan auto` (hoặc gỡ gói) trả quạt cho firmware ngay; EC tự reset khi reboot — không thí nghiệm nào để lại trạng thái kẹt.
-- **Code:** mọi thay đổi theo phase, mỗi phase một nhánh/PR riêng; revert phase không đụng phase trước. Phase 3 (power) tắt được độc lập bằng cấu hình, không ảnh hưởng fan/RGB.
-- **Dữ liệu:** profile/curve lưu ở file người dùng; `purge` xóa sạch như hành vi `.deb` hiện tại.
-- **Cấm trong mọi phase:** ghi EC register chưa qua G2, flash firmware/BIOS, ghi power ngoài khoảng báo, chạy soak không có đường thoát firmware-auto đã kiểm chứng trước.
+Use a dedicated SELinux domain, root-owned runtime/state directories and explicit
+scriptlet dependencies. Do not grant all `init_t` processes raw-memory access.
+Never bundle arbitrary untracked developer files into distributable source RPMs.
+Build/package/test success is not install/upgrade/erase validation.
+
+## Gates requiring separate approval
+
+1. **Transport:** exact firmware/backend identity and reviewed kernel
+   synchronization; audit initialization writes before loading any driver.
+2. **Controlled fan/RGB operation:** bounded procedure, valid temperatures,
+   physical observation and an independently available recovery path.
+3. **Lifecycle:** clean stop, kill, hung loop, failed transport and suspend/resume
+   tested separately. Stop on unresolved handback; do not proceed to soak.
+4. **Power controls:** proven setter support and a reviewed combined budget, not
+   merely `[min,max]` metadata. No MSR/undervolt bypass or firmware flashing.
+5. **Sustained workloads:** approved load/duration/abort conditions and repeated
+   measurement protocol from [BENCHMARKING.md](BENCHMARKING.md).
+
+Current implementation/unit/hardware status is tracked in [../TASKS.md](../TASKS.md)
+and [../COMPATIBILITY.md](../COMPATIBILITY.md), not inferred from old completion labels.

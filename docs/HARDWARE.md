@@ -1,6 +1,9 @@
 # HARDWARE — G5 GE research, compatibility, benchmark
 
-> Nguồn sự thật về phần cứng của fork này. Giao thức EC chi tiết nằm ở
+> Historical hardware record, not acceptance of the M1 safety implementation.
+> Current feature status: [../COMPATIBILITY.md](../COMPATIBILITY.md).
+> Research corrections: [../RESEARCH.md](../RESEARCH.md).
+> Giao thức EC chi tiết nằm ở
 > [PROTOCOL.md](PROTOCOL.md) (canonical); bảng support cho người dùng nằm ở
 > [README.md](../README.md) và phải khớp tập verified trong code
 > (`gui/gigactl_gui/model.py: VERIFIED_MODELS`, có test giữ).
@@ -15,8 +18,9 @@
 - **Không trộn model:** GE (3050/75W) ≠ ME (3050 Ti) ≠ KE (3060/115W) ≠
   GD/MD/KD (11th-gen) ≠ MF (RTX 4050). Mọi kết luận phải đo trên đúng model.
 - Máy đã đo (2026-10-26, `docs/probe/g5-ge-fb06.txt`): DMI `G5 GE`, board
-  `G5 GE`, **BIOS FB06**, Fedora kernel 7.2.11. RAPL `long_term` 45W (trần
-  45W), `short_term` 115W. NVIDIA: limit hiện tại/default 60W, max 75W.
+  `G5 GE`, **BIOS FB06**, Fedora kernel 7.2.11. RAPL `long_term` configured
+  45W, advertised PL1 maximum 45W (not proof of a BIOS lock), `short_term`
+  115W. NVIDIA: limit hiện tại/default 60W, max 75W (setter support untested).
   Pin 29.09/52.51 Wh (~55% health — thông tin monitoring, ngoài scope).
 - **Unknown:** part EC/ITE chính xác. Không chép IT8518E từ Clevo đời cũ sang.
 
@@ -51,9 +55,12 @@ biệt từng quạt (G2) → failsafe khi daemon dừng (một phần G3, xem S
   interface đó** (`CONFIG_ACPI_EC=y`, `CONFIG_ACPI_EC_DEBUGFS` tắt, đã kiểm
   trong `/boot/config`) nên trên Fedora daemon dùng `DevPortBackend`
   (`/dev/port`, `CONFIG_DEVPORT=y`) — race với EC driver của kernel được
-  giảm thiểu bằng verify-read-back, engine retry mỗi tick và watchdog.
-- In-tree `gigabyte-wmi` chỉ phục vụ mainboard desktop. Driver Clevo/TUXEDO
-  là DKMS ngoài cây, guard theo branding — chỉ là dự phòng, không phải nền.
+  **không được loại bỏ** bởi readback/retry hoặc userspace flock. M1 không tự
+  động chọn backend này; raw access chỉ là experimental opt-in, chưa có native
+  backend thay thế được hardware-validate.
+- In-tree `gigabyte-wmi` không cung cấp laptop fan/RGB controls. Current
+  Clevo/TUXEDO source has CPU exemptions to branding checks; compatibility,
+  initialization side effects and kernel arbitration still need audit.
 - Dùng được ngay: `coretemp`, `intel_pstate` + powercap/RAPL, NVML, UPower
   (chỉ đọc). Probe chuẩn: `tools/probe.sh` (read-only, có test cấm ghi).
 
@@ -66,9 +73,13 @@ biệt từng quạt (G2) → failsafe khi daemon dừng (một phần G3, xem S
 | Firmware | 61.9 °C | 2149 MHz | 27% |
 | performance | 63.2 °C | 2150 MHz | 65% |
 
-Kết luận trung thực: tải CPU-only này **bị chặn bởi PL1 45W, không phải
-nhiệt**, nên fan không đổi hiệu năng. Arm CPU+GPU (game/Unigine, ≥3 lượt)
-còn mở — chưa có tuyên bố sustained-performance nào cho tới khi có số đó.
+Supported conclusion: this single historical CPU-only soak reported similar
+average MHz. It measured no throughput, package power or active limiting reason;
+neither performance equivalence nor PL1 as the bottleneck was established.
+CPU/GPU/combined repeated testing remains open; see [BENCHMARKING.md](BENCHMARKING.md).
+
+The raw probe's instantaneous NVIDIA reading of **749.67W** is an invalid outlier
+for power/performance inference. The raw file is preserved; its cause is unknown.
 
 ## 5. Dự án tương tự & khi nào cần RE
 

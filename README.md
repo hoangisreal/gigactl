@@ -2,6 +2,11 @@
 
 **Fan and RGB keyboard backlight control for Gigabyte G5 / G6 gaming laptops on Linux.**
 
+> **Local safety-development branch:** M1 changes are source/fake-tested, not
+> hardware-validated or deployed. Do not install this checkout over a working
+> controller without reviewing [COMPATIBILITY.md](COMPATIBILITY.md) and the
+> [hardware gates](docs/TESTING.md). No new performance improvement is claimed.
+
 Gigabyte ships no Linux software for its G-series laptops. The firmware fan curve is lazy (it holds low fan duty until the CPU throttles at ~96 °C), the keyboard backlight can't be changed, and tools like NBFC, fancontrol and OpenRGB don't support these machines.
 
 `gigactl` fixes that with two small, dependency-light CLI tools built on a reverse-engineered Embedded Controller (EC) protocol — these laptops are Clevo-ODM designs, and the EC speaks a Clevo-style mailbox protocol documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
@@ -12,12 +17,19 @@ Gigabyte ships no Linux software for its G-series laptops. The firmware fan curv
 | `gkbd` | Keyboard backlight color (single-zone RGB), brightness, on/off — persists across reboot and suspend |
 
 Both tools check for the `gigactl` daemon first. When it is running they drive it
-over D-Bus — no `sudo`, no `ec_probe`, and no risk of two writers taking turns on
-one EC mailbox. With no daemon they write the EC themselves as they always have,
-serialising on the same lock the daemon uses. And when they *cannot tell* — no
-`busctl`, no answer from the bus — they refuse rather than guess.
+over D-Bus — no `sudo` or `ec_probe`. A lifetime controller lease is separate from
+mailbox transaction locking. Direct writes with no daemon now require explicit
+`GIGACTL_ALLOW_DIRECT=1`; direct operations acquire the controller lease and
+recheck bus ownership. Unknown bus state is refused. These userspace locks do
+**not** arbitrate raw I/O against the kernel EC driver.
 
 ## Supported hardware
+
+The following table records **historical protocol observations**, not acceptance
+of the new safety implementation. The privileged daemon's verified-platform
+gate currently accepts G5 GE / FB06 and G6 KF; it does not inherit the broad
+same-family expectation below. New BIOS/backend/session validation is tracked
+per feature in [COMPATIBILITY.md](COMPATIBILITY.md).
 
 | Model | Status |
 |-------|--------|
@@ -39,14 +51,27 @@ was not: the kernel's EC interface had been loaded read-only, so every reading
 was correct and every command was refused. `gfan` and the app now say that in
 words, and name the command that fixes it, instead of reporting an errno.
 
-Both tools check your DMI vendor/model before writing anything, and `gfan` verifies the EC actually obeyed each command — if it didn't, it automatically reverts to firmware control. Untested-but-same-family models are allowed with a notice; anything else is refused (override with `GFAN_UNSAFE=1` / `GKBD_UNSAFE=1` at your own risk).
+The daemon now also checks DMI at the privileged boundary. A fan target remains
+**verifying** until readback converges; failed handback remains **unconfirmed**
+and is retried independently per fan. Command acknowledgement does not prove
+physical firmware ownership. Model-wide banners are not a substitute for this
+per-feature evidence.
+
+### Fedora transport limitation
+
+This Fedora kernel lacks ec_sys debugfs. The new daemon therefore refuses
+automatic `/dev/port` fallback. Raw access requires the experimental
+`--allow-raw-ec` option or root service environment `GIGACTL_ALLOW_RAW_EC=1`,
+including for stop-post recovery. **Do not enable it merely to make an error
+disappear:** raw reads/writes can race the kernel ACPI EC protocol. A validated
+native Clevo transport is still a research gate; none was loaded in this work.
 
 ## Install
 
 ### The package (recommended)
 
 ```bash
-sudo apt install ./gigactl_1.0.0_amd64.deb
+sudo apt install ./gigactl_1.2.0_amd64.deb
 ```
 
 One `.deb` installs everything: the **GigaControl** desktop app, the `gigactld`
@@ -54,6 +79,11 @@ daemon that owns EC access, and both CLI tools. The daemon starts immediately an
 at every boot; the app appears in your app grid and keeps a tray icon from the
 next login. Installation is refused on hardware outside the Gigabyte G5/G6/G7
 range (override with `GIGACTL_FORCE_INSTALL=1`).
+
+On a first install the daemon needs `ec_sys`, which only loads at boot: reboot
+after installing, or `sudo modprobe ec_sys` followed by
+`sudo systemctl restart gigactl.service`. Until then it fails closed rather than
+touching raw ports.
 
 `sudo apt remove gigactl` stops the daemon and hands the fans back to the
 firmware curve; `sudo apt purge gigactl` also drops the saved profile, curves and
@@ -71,7 +101,43 @@ dpkg-buildpackage -us -uc -b        # the .deb lands in the parent directory
 Releases are built by CI: pushing a `v*` tag builds the `.deb` on a pinned
 ubuntu-24.04 runner and attaches it to the GitHub Release, with the notes taken
 from that `debian/changelog` entry. The tag has to match the changelog version —
-add the entry first, then `git tag v1.0.0 && git push origin v1.0.0`.
+add the entry first, then `git tag v1.2.0 && git push origin v1.2.0`.
+
+### Fedora (RPM)
+
+```bash
+./fedora/build-rpm.sh   # refuses a dirty tree; RPMs land in fedora/RPMS/
+sudo dnf install ./fedora/RPMS/gigactl-1.2.0-1.fc44.noarch.rpm
+```
+
+The RPM installs the same daemon, app and CLI tools, plus a dedicated
+`gigactld_t` SELinux domain. Three differences from the `.deb` matter:
+
+- Installation refuses to run while the daemon is active: stop it and confirm
+  the fans are back on firmware first (`sudo systemctl stop gigactl.service`).
+  Installing or upgrading never restarts hardware control by itself.
+- The service ships disabled: `sudo systemctl enable --now gigactl.service`
+  starts it now and at every boot.
+- Fedora kernels ship no `ec_sys` interface, so the daemon fails closed until
+  an administrator explicitly opts in to raw EC access:
+
+```bash
+sudo mkdir -p /etc/systemd/system/gigactl.service.d
+printf '[Service]\nEnvironment=GIGACTL_ALLOW_RAW_EC=1\n' |
+  sudo tee /etc/systemd/system/gigactl.service.d/raw-ec.conf
+sudo systemctl daemon-reload
+sudo systemctl restart gigactl.service
+```
+
+Raw access races the kernel's own EC driver; the opt-in is deliberate and the
+package will not set it for you.
+
+### Tray icon
+
+The tray icon needs a StatusNotifierWatcher host: KDE and most bars provide
+one, GNOME needs an AppIndicator extension. With no host at all, a `--tray`
+launch shows the window instead of running invisibly; if the host appears
+moments later (a slow bar at login), the window hides itself again.
 
 ### From a source checkout (CLI only)
 
@@ -104,7 +170,11 @@ gfan max          # both fans 100%
 gfan auto         # give control back to firmware
 ```
 
-Safety: speeds below 30% are refused while the CPU is ≥ 85 °C (override with `--force`), and everything resets to firmware auto on reboot — no experiment can leave you stuck.
+Software fan control is supervised even in manual mode: a 30% minimum at 70°C,
+and 100% emergency requests at CPU 95°C or GPU 87°C. These are conservative
+**software thresholds**, not measured firmware limits. `--force` must not bypass
+thermal protection. Firmware mode yields to the laptop; failed recovery is
+reported, not guaranteed away by a cleanup handler or a reboot claim.
 
 ### Keyboard backlight
 
@@ -130,8 +200,10 @@ Both quirks cost real debugging time and are documented in full — register map
 ## Documentation
 
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) — the EC protocol (canonical, measured).
-- [docs/HARDWARE.md](docs/HARDWARE.md) — fork research: G5 GE hardware, compatibility matrix, benchmark record.
-- [docs/PLAN.md](docs/PLAN.md) — fork roadmap and task status; [docs/SAFETY.md](docs/SAFETY.md) — risk gates, fallback, rollback.
+- [PLAN.md](PLAN.md) · [TASKS.md](TASKS.md) — roadmap and implementation/test/hardware gates.
+- [RESEARCH.md](RESEARCH.md) · [COMPATIBILITY.md](COMPATIBILITY.md) — findings, unknowns and feature-specific support.
+- [docs/HARDWARE.md](docs/HARDWARE.md) — historical machine and measurement record.
+- [docs/SAFETY.md](docs/SAFETY.md) · [docs/TESTING.md](docs/TESTING.md) · [docs/BENCHMARKING.md](docs/BENCHMARKING.md) — safety and validation.
 - [docs/UPSTREAM.md](docs/UPSTREAM.md) — upstream contribution plan and PR drafts (fork-only, not shipped in packages).
 - [daemon/README.md](daemon/README.md) · [gui/README.md](gui/README.md) — developer notes per component.
 
@@ -143,7 +215,9 @@ Both quirks cost real debugging time and are documented in full — register map
 
 ## Disclaimer
 
-This software writes to your laptop's Embedded Controller. It is tested on the Gigabyte G6 KF and guarded against running on unsupported hardware, but you use it at your own risk. A reboot always returns the EC to firmware defaults.
+This software can write to your laptop's Embedded Controller. Historical tests
+do not validate every new implementation, BIOS or backend. Recovery is
+best-effort; kernel/firmware failure can prevent it. Read the safety gates first.
 
 ## License
 

@@ -1,59 +1,39 @@
 #!/usr/bin/env python3
-"""Live smoke test: the real Daemon driving the real EC on Fedora.
+"""Experimental foreground launcher using the guarded daemon entrypoint.
 
-    sudo python3 tools/daemon_smoke.py
+    sudo python3 tools/daemon_smoke.py --experimental [--allow-raw]
 
-Runs the daemon's own tick loop in-process (no D-Bus) with the
-'performance' profile for ~8s, printing telemetry each tick, then ALWAYS
-hands both fans back to firmware auto in a finally block. This exercises
-the exact code path gigactld runs — profile engine, mailbox writes,
-verify-by-telemetry — against the DevPortBackend Fedora requires.
+The former private _tick() smoke path bypassed lifecycle supervision. This
+wrapper instead runs the canonical entrypoint: platform guard, lifetime owner
+lease, bus-name ownership, watchdog and independent best-effort fan cleanup
+remain in one place. Normal startup can restore the daemon's saved settings;
+this wrapper does not select a test profile or start a workload. Stop with
+SIGINT/SIGTERM; retain stdout/stderr as evidence. This is
+not a compatibility test or a guarantee of cleanup after transport failure,
+SIGKILL, or power loss. Raw I/O can still race kernel/ACPI EC access.
 """
+import argparse
 import pathlib
 import sys
-import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "daemon"))
 
-from gigactld import fans, telemetry  # noqa: E402
-from gigactld.ec import DevPortBackend, EmbeddedController  # noqa: E402
-from gigactld.service import Daemon  # noqa: E402
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--experimental", action="store_true", help="explicitly authorize this live EC write experiment")
+    parser.add_argument("--allow-raw", action="store_true", help="also opt in to raw I/O if native ec_sys is absent")
+    args = parser.parse_args(argv)
+    if not args.experimental:
+        parser.error("live EC writes require --experimental; no automatic experiment is run")
+    # Deferred import keeps help, opt-in refusal and tests free of D-Bus setup.
+    from gigactld.__main__ import main as daemon_main
 
-class _Conn:
-    def emit_signal(self, *a):
-        pass
-
-
-def main() -> int:
-    ec = EmbeddedController(backend=DevPortBackend())
-    daemon = Daemon(ec)
-    daemon._conn = _Conn()
-    daemon.state_path = "/tmp/gigactl-smoke-state.json"
-    daemon.engine.set_profile("performance")
-    print(">>> daemon driving fans with 'performance' for ~8s <<<", flush=True)
-    try:
-        for i in range(4):
-            daemon._tick()
-            t = telemetry.read_telemetry(ec)
-            print(f"tick {i}: cpu={t.cpu_temp}C gpu={t.gpu_temp}C "
-                  f"dut1={t.fan1_duty_pct}% dut2={t.fan2_duty_pct}% "
-                  f"rpm1={t.fan1_rpm} rpm2={t.fan2_rpm} "
-                  f"fault={daemon._engine_fault}", flush=True)
-            time.sleep(2)
-    finally:
-        # Not optional: firmware gets its fans back whatever happened.
-        daemon.engine.set_profile("firmware")
-        for f in fans.FANS:
-            fans.restore_auto(ec, f)
-        print(">>> fans handed back to firmware auto <<<", flush=True)
-    # The duty register keeps the last commanded value until the firmware
-    # loop recomputes; give it a few seconds before judging the handback.
-    time.sleep(4)
-    t = telemetry.read_telemetry(ec)
-    print(f"final: dut1={t.fan1_duty_pct}% dut2={t.fan2_duty_pct}% "
-          f"profile={daemon.engine.profile}")
-    return 0
+    forwarded = ["--interval", "2"]
+    if args.allow_raw:
+        forwarded.append("--allow-raw-ec")
+    print("EXPERIMENTAL: launching supervised foreground daemon; no automatic test profile or workload", flush=True)
+    return daemon_main(forwarded)
 
 
 if __name__ == "__main__":
