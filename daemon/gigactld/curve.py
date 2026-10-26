@@ -18,7 +18,8 @@ FANS = (CPU_FAN, GPU_FAN)
 POINTS = 5
 HYSTERESIS_C = 4
 FLOOR_PCT = 30
-FLOOR_TEMP_C = 85
+FLOOR_TEMP_C = 70
+EMERGENCY_TEMP_C = 95
 
 Point = tuple[int, int]
 Curve = list[Point]
@@ -51,8 +52,10 @@ def duty_for(curve: Curve, temp: int) -> int:
 
 
 def apply_floor(duty: int, temp: int, floor_pct: int = FLOOR_PCT,
-                floor_temp: int = FLOOR_TEMP_C) -> int:
-    """Never let a fan drop below ``floor_pct`` while its source temp is hot."""
+                 floor_temp: int = FLOOR_TEMP_C) -> int:
+    """Conservative software floor, with an emergency override above hysteresis."""
+    if temp >= EMERGENCY_TEMP_C:
+        return 100
     if temp >= floor_temp:
         return max(duty, floor_pct)
     return duty
@@ -168,6 +171,10 @@ class ProfileEngine:
 
     def curve_for(self, fan: int) -> Curve:
         return self._curves.get(fan, [])
+
+    def requested_duty(self, fan: int) -> Optional[int]:
+        """Last policy decision, NOT proof the hardware applied it."""
+        return self._last_duty.get(fan)
 
     def decide(self, fan: int, source_temp: int,
                cpu_temp: Optional[int] = None) -> Optional[int]:

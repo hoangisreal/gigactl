@@ -18,6 +18,8 @@ class RecordingEc:
     def write_u8(self, off, val):
         self.writes.append((off, val))
         self.regs[off] = val
+        if off == mailbox.FCMD:
+            self.regs[off] = 0  # emulate firmware command consumption/ack
 
     def transaction(self):
         return nullcontext()
@@ -53,6 +55,14 @@ def test_invalid_fan_rejected():
     ec = RecordingEc()
     with pytest.raises(ValueError):
         fans.set_duty(ec, fan=3, pct=50)
+
+
+@pytest.mark.parametrize("bad", [-1, 101, True, 50.0, "50"])
+def test_invalid_duty_percent_rejected_before_any_write(bad):
+    ec = RecordingEc()
+    with pytest.raises(ValueError):
+        fans.set_duty(ec, fan=1, pct=bad)
+    assert ec.writes == []
 
 
 def test_expand_maps_selector_to_real_fans():

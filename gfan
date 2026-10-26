@@ -8,9 +8,9 @@
 #     root (polkit lets the console user do this without a password), no ec_probe,
 #     and no chance of the two interleaving mailbox sequences. It never touches a
 #     register in this mode.
-#   direct — the daemon is definitely not running, so gfan drives the EC itself as
-#     it always has, keeping its safety guards and holding the daemon's own EC
-#     lock so concurrent invocations serialise. When it *cannot tell* — no busctl,
+#   direct — explicitly opted-in writes when the daemon is definitely absent,
+#     holding the controller lifetime lease and the EC mailbox lock throughout.
+#     When it *cannot tell* — no busctl,
 #     no answer from the bus — it refuses rather than guessing direct.
 #
 # Protocol (EC mailbox, ACPI EC ports via ec_probe):
@@ -34,18 +34,21 @@ STATE=${GFAN_STATE:-/run/gfan.mode}
 
 MODEL=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
 VENDOR=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true)
+BIOS=$(cat /sys/class/dmi/id/bios_version 2>/dev/null || true)
 
-model_check() { # gate WRITE commands on supported hardware (reads are harmless)
-  [ "${GFAN_UNSAFE:-0}" = "1" ] && return 0
-  case "$VENDOR" in
-    GIGABYTE*|Gigabyte*) ;;
-    *) die "vendor '$VENDOR' unsupported — verified on Gigabyte G6 KF only. GFAN_UNSAFE=1 gfan ... to override (risky)." ;;
-  esac
+model_check() { # gate WRITE commands on supported hardware (reads still need the lease)
+  # Mirror the privileged daemon's exact allowlist (daemon/gigactld/platform.py):
+  # GIGABYTE G5 GE on BIOS FB06, or GIGABYTE G6 KF (BIOS coverage unrecorded).
+  # Similar model names are refused, not warned through: a write guard that
+  # only prints a note is not a guard.
+  [ "$VENDOR" = "GIGABYTE" ] || \
+    die "vendor '$VENDOR' unsupported — writes require a GIGABYTE machine (allowlist: G5 GE BIOS FB06, G6 KF)."
   case "$MODEL" in
-    "G6 KF"|"G5 GE") ;;  # verified live (G5 GE: gate G2, 2026-10-26)
-    G5*|G6*|G7*)
-      echo "gfan: note: '$MODEL' untested (verified on G6 KF; same Clevo platform expected)." >&2 ;;
-    *) die "model '$MODEL' unsupported — verified on Gigabyte G6 KF only. GFAN_UNSAFE=1 gfan ... to override (risky)." ;;
+    "G5 GE")
+      [ "$BIOS" = "FB06" ] || \
+        die "G5 GE writes require BIOS FB06 (found '${BIOS:-unreadable}')." ;;
+    "G6 KF") ;;
+    *) die "model '$MODEL' unsupported for writes — allowlist: GIGABYTE G5 GE (BIOS FB06) or G6 KF. Reads still work." ;;
   esac
 }
 
@@ -60,7 +63,7 @@ read_telemetry() { # sets T_CPU T_GPU T_RPM1 T_RPM2 T_DUTY1 T_DUTY2
   [ -n "${T_DUTY2:-}" ] || die "unexpected telemetry from the daemon: $out"
 }
 
-daemon_cpu_temp() { read_telemetry; echo "$T_CPU"; }
+daemon_temperatures() { read_telemetry; }
 
 daemon_set_duties() { # $1=fan1 pct $2=fan2 pct
   if [ "$1" -eq "$2" ]; then
@@ -73,7 +76,7 @@ daemon_set_duties() { # $1=fan1 pct $2=fan2 pct
   call SetFanDuty uu 1 "$1"
   if ! try_call SetFanDuty uu 2 "$2"; then
     local fan2_error=$CALL_ERROR
-    # fan1 is already manual at $1% — mirror direct mode's revert_auto rather
+    # fan1 is already manual at $1% — mirror direct mode's recovery rather
     # than leaving it stranded there.
     if try_call RestoreFirmware; then
       die "the daemon refused fan2's duty: $fan2_error — reverted both fans to firmware auto."
@@ -101,12 +104,29 @@ daemon_status() {
 
 # --- direct mode --------------------------------------------------------------
 
-rd() { "$EP" read "$1" 2>/dev/null | awk '{print $1}'; }
+rd() {
+  local out value rc
+  out=$("$EP" read "$1" 2>/dev/null) || {
+    rc=$?; warn "EC read $1 failed (status $rc)"; return "$rc";
+  }
+  read -r value _ <<< "$out"
+  if [[ "$value" =~ ^[0-9]{1,3}$ ]]; then
+    value=$((10#$value))
+  elif [[ "$value" =~ ^0[xX][0-9a-fA-F]{1,2}$ ]]; then
+    value=$((value))
+  else
+    warn "invalid EC byte from register $1: $out"; return 1
+  fi
+  [ "$value" -le 255 ] || { warn "out-of-range EC byte from register $1: $out"; return 1; }
+  echo "$value"
+}
 
 send() { # send fan-cmd: $1=FDAT $2=FBUF
-  "$EP" write 0xF9 "$1" >/dev/null
-  "$EP" write 0xFA "$2" >/dev/null
-  "$EP" write 0xF8 0xC1 >/dev/null
+  # Explicit returns matter when called by recovery inside an if/|| context:
+  # Bash disables errexit there, and a failed parameter must not ring a doorbell.
+  "$EP" write 0xF9 "$1" >/dev/null || return $?
+  "$EP" write 0xFA "$2" >/dev/null || return $?
+  "$EP" write 0xF8 0xC1 >/dev/null || return $?
 }
 
 set_fan() { # $1=fan index (1|2), $2=percent
@@ -116,9 +136,46 @@ set_fan() { # $1=fan index (1|2), $2=percent
 
 auto_fan() { send 0xFF "$1"; }
 
-revert_auto() {
-  auto_fan 1; sleep 0.3; auto_fan 2; rm -f "$STATE"
-  die "$1 Reverted to automatic."
+FAN_TRANSACTION=0
+
+restore_both() {
+  local rc1=0 rc2=0
+  # Independent attempts: a failed first fan must never skip the second fan.
+  auto_fan 1 || rc1=$?
+  sleep 0.3 || true
+  auto_fan 2 || rc2=$?
+  if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+    warn "firmware-auto command failures: fan1 status $rc1, fan2 status $rc2; recovery is NOT confirmed."
+    [ "$rc1" -eq 0 ] || return "$rc1"
+    return "$rc2"
+  fi
+  rm -f "$STATE" || return $?
+}
+
+fan_transaction_exit() {
+  local rc=$1
+  trap - EXIT
+  # Finish BOTH attempts even if another INT/TERM arrives during recovery. This
+  # is best effort only: SIGKILL, power loss and a dead EC cannot be handled.
+  trap '' INT TERM
+  if [ "$FAN_TRANSACTION" -eq 1 ] && [ "$rc" -ne 0 ]; then
+    warn "fan transaction failed (status $rc); attempting firmware auto for BOTH fans."
+    if restore_both; then
+      warn "firmware-auto commands sent to both fans; firmware mode is not read-back verified."
+    else
+      warn "firmware recovery incomplete; fan mode is UNKNOWN."
+      echo "unknown: firmware-auto recovery incomplete" > "$STATE" || \
+        warn "could not record the unknown fan mode"
+    fi
+  fi
+  exit "$rc"
+}
+
+begin_fan_transaction() {
+  trap 'fan_transaction_exit $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  FAN_TRANSACTION=1
 }
 
 verify_or_revert() { # $1=pct1 $2=pct2 — safety net for unknown models.
@@ -128,7 +185,9 @@ verify_or_revert() { # $1=pct1 $2=pct2 — safety net for unknown models.
   local i g1 g2 e1 e2 last1=-99 last2=-99 strikes=0
   for i in $(seq 1 50); do  # up to ~25s (full-range downward glide)
     sleep 0.5
-    g1=$(rd 0xCE); g2=$(rd 0xCF)
+    guard "$(( $1 < $2 ? $1 : $2 ))"
+    g1=$(rd 0xCE) || return $?
+    g2=$(rd 0xCF) || return $?
     e1=$(( g1 > d1 ? g1 - d1 : d1 - g1 ))
     e2=$(( g2 > d2 ? g2 - d2 : d2 - g2 ))
     [ "$e1" -le 10 ] && [ "$e2" -le 10 ] && return 0   # converged
@@ -142,7 +201,7 @@ verify_or_revert() { # $1=pct1 $2=pct2 — safety net for unknown models.
             echo "gfan: note: EC settled at $(( g1 * 100 / 255 ))%/$(( g2 * 100 / 255 ))% (firmware clamp?)" >&2
             return 0
           fi
-          revert_auto "EC did not accept the duty write — protocol may not match '$MODEL'."
+          die "EC did not accept the duty write — protocol may not match '$MODEL'."
         fi
       else
         strikes=0
@@ -150,37 +209,44 @@ verify_or_revert() { # $1=pct1 $2=pct2 — safety net for unknown models.
     fi
     last1=$g1; last2=$g2
   done
-  revert_auto "duty never converged — protocol may not match '$MODEL'."
+  die "duty never converged — protocol may not match '$MODEL'."
 }
 
-direct_cpu_temp() { rd 0x07; }
-direct_gpu_temp() { rd 0x0A; }
+direct_temperatures() {
+  T_CPU=$(rd 0x07) || return $?
+  T_GPU=$(rd 0x0A) || return $?
+}
 
 rpm_of() { # $1=hi-byte reg, $2=lo-byte reg
   local hi lo raw
-  hi=$(rd "$1"); lo=$(rd "$2"); raw=$(( hi * 256 + lo ))
+  hi=$(rd "$1") || return $?
+  lo=$(rd "$2") || return $?
+  raw=$(( hi * 256 + lo ))
   if [ "$raw" -eq 0 ] || [ "$raw" -ge 65280 ]; then echo 0; else echo $(( 2156220 / raw )); fi
 }
 
 direct_set_duties() { # $1=fan1 pct $2=fan2 pct
-  lock_ec
+  begin_fan_transaction
   set_fan 1 "$1"; sleep 0.3; set_fan 2 "$2"
   verify_or_revert "$1" "$2"
   echo "manual: fan1=${1}% fan2=${2}%" > "$STATE"
+  warn "direct manual duty has no ongoing thermal watchdog; use the daemon for sustained control."
 }
 
 direct_restore_auto() {
-  lock_ec
-  auto_fan 1; sleep 0.3; auto_fan 2
-  rm -f "$STATE"
+  begin_fan_transaction
+  restore_both
 }
 
 direct_status() {
   local d1 d2 r1 r2 mode
-  d1=$(rd 0xCE); d2=$(rd 0xCF)
-  r1=$(rpm_of 0xD0 0xD1); r2=$(rpm_of 0xD2 0xD3)
-  mode=$(cat "$STATE" 2>/dev/null || echo "auto (firmware)")
-  echo "CPU: $(direct_cpu_temp)°C   GPU: $(direct_gpu_temp)°C"
+  d1=$(rd 0xCE) || return $?
+  d2=$(rd 0xCF) || return $?
+  r1=$(rpm_of 0xD0 0xD1) || return $?
+  r2=$(rpm_of 0xD2 0xD3) || return $?
+  direct_temperatures
+  mode=$(cat "$STATE" 2>/dev/null || echo "unknown (no saved direct-mode state; firmware default expected)")
+  echo "CPU: ${T_CPU}°C   GPU: ${T_GPU}°C"
   printf "Fan1 (CPU): duty %3d%%  ~%4d RPM\n" $(( d1 * 100 / 255 )) "$r1"
   printf "Fan2 (GPU): duty %3d%%  ~%4d RPM\n" $(( d2 * 100 / 255 )) "$r2"
   echo "Mode: $mode"
@@ -204,23 +270,39 @@ Usage:
   gfan max               both fans -> 100%
   gfan <pct>             both fans -> pct% (0-100)
   gfan <pct1> <pct2>     fan1 (CPU) -> pct1%, fan2 (GPU) -> pct2%
-  gfan <pct> --force     allow low speeds even when hot
+  gfan <pct> --force     obsolete; DOES NOT bypass thermal safety
 
 Notes:
   * With the gigactl daemon running, gfan drives it over D-Bus and needs no root.
-    Without it, gfan writes the EC directly and re-runs itself under sudo. If it
-    cannot tell whether the daemon is running, it refuses rather than guesses.
+    Without it, writes require explicit GIGACTL_ALLOW_DIRECT=1 and root/sudo.
+    Direct reads and writes hold an exclusive controller lease; an unknown bus
+    state refuses access. A running daemon never permits direct fallback.
   * Settings reset to automatic on reboot (safe default).
-  * Low speeds (<30%) are refused while CPU >= 85°C unless --force.
+  * Conservative SOFTWARE thresholds, not firmware critical limits: at either
+    sensor >=70°C require >=30%; CPU >=95°C OR GPU >=87°C require both at 100%.
+    This includes the legacy 30% floor at 85°C. --force cannot bypass safety.
+  * Direct manual duty has no ongoing watchdog after this command exits.
+    Failure/INT/TERM attempt firmware auto for BOTH fans; no SIGKILL guarantee.
 EOF
 }
 
 is_pct() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -le 100 ]; }
 
 guard() { # $1 = lowest requested pct
-  local t; t=$(op cpu_temp)
-  if [ "$1" -lt 30 ] && [ "${t:-0}" -ge 85 ]; then
-    die "refusing ${1}% while CPU is ${t}°C (>=85°C). Use --force to override."
+  op temperatures
+  # Mirror the daemon's thermal policy (daemon/gigactld/safety.py): CPU data is
+  # mandatory (1..125°C); a GPU reading of 0 means unavailable/asleep, not
+  # 0°C, so it is ignored rather than treated as a fatal sensor failure. A
+  # nonzero GPU reading outside 1..125 is invalid data and refuses the write.
+  [[ "$T_CPU" =~ ^[0-9]{1,3}$ ]] && [ "$T_CPU" -ge 1 ] && [ "$T_CPU" -le 125 ] || \
+    die "cannot establish a safe CPU temperature (CPU=${T_CPU}, GPU=${T_GPU}) — refusing manual duty."
+  [[ "$T_GPU" =~ ^[0-9]{1,3}$ ]] && { [ "$T_GPU" -eq 0 ] || { [ "$T_GPU" -ge 1 ] && [ "$T_GPU" -le 125 ]; }; } || \
+    die "cannot establish safe temperatures (CPU=${T_CPU}, GPU=${T_GPU}) — refusing manual duty."
+  if [ "$1" -lt 100 ] && { [ "$T_CPU" -ge 95 ] || [ "$T_GPU" -ge 87 ]; }; then
+    die "refusing ${1}% at CPU=${T_CPU}°C / GPU=${T_GPU}°C: software emergency requires BOTH fans at 100% (CPU>=95°C or GPU>=87°C)."
+  fi
+  if [ "$1" -lt 30 ] && { [ "$T_CPU" -ge 70 ] || [ "$T_GPU" -ge 70 ]; }; then
+    die "refusing ${1}% at CPU=${T_CPU}°C / GPU=${T_GPU}°C: software floor requires >=30% at either sensor >=70°C (including the legacy 85°C floor)."
   fi
 }
 
@@ -231,9 +313,9 @@ main() {
 
   detect_mode
   if [ "$MODE" = direct ]; then
-    # Only the direct path needs the tool and the privileges to use it.
-    [ -x "$EP" ] || die "ec_probe not found (nbfc-linux package), and the gigactl daemon is not running"
-    if [ "$(id -u)" -ne 0 ]; then exec sudo "$0" "$@"; fi
+    local write=1
+    case "${1:-}" in status|watch|"") write=0 ;; esac
+    prepare_direct "$write" "$@"
   fi
 
   case "${1:-}" in
@@ -242,23 +324,32 @@ main() {
     auto)
       model_check
       op restore_auto
-      echo "Fans restored to firmware automatic control." ;;
+      if [ "$MODE" = daemon ]; then
+        echo "Fans restored to firmware automatic control."
+      else
+        echo "Firmware-auto commands sent to both fans; firmware mode is not read-back verified."
+      fi ;;
     max)
       model_check
+      guard 100
       op set_duties 100 100
       echo "Both fans at 100%." ;;
     *)
-      local force=0 args=()
-      for a in "$@"; do [ "$a" = "--force" ] && force=1 || args+=("$a"); done
+      local args=()
+      for a in "$@"; do
+        if [ "$a" = "--force" ]; then
+          warn "--force is obsolete and cannot bypass thermal safety."
+        else
+          args+=("$a")
+        fi
+      done
       local n=${#args[@]}
       { [ "$n" -ge 1 ] && [ "$n" -le 2 ]; } || { usage; exit 1; }
       for p in "${args[@]}"; do is_pct "$p" || die "'$p' is not a percentage 0-100"; done
-      local p1=${args[0]} p2=${args[0]}
-      [ "$n" -eq 2 ] && p2=${args[1]}
+      local p1=$((10#${args[0]})) p2=$((10#${args[0]}))
+      [ "$n" -eq 2 ] && p2=$((10#${args[1]}))
       model_check
-      if [ "$force" -eq 0 ]; then
-        local low=$(( p1 < p2 ? p1 : p2 )); guard "$low"
-      fi
+      local low=$(( p1 < p2 ? p1 : p2 )); guard "$low"
       op set_duties "$p1" "$p2"
       echo "Set: fan1 (CPU) = ${p1}%, fan2 (GPU) = ${p2}%"
       ;;

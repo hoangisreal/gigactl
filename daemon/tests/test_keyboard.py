@@ -15,6 +15,10 @@ class RecordingEc:
     def write_u8(self, off, val):
         self.writes.append((off, val))
 
+    def read_u8(self, off):
+        assert off == mailbox.FCMD
+        return 0  # emulate immediate firmware command consumption/ack
+
     def transaction(self):
         return nullcontext()
 
@@ -50,13 +54,13 @@ def test_set_color_enables_first_then_writes_BRG_order():
     ]
 
 
-def test_set_color_clamps_components():
+@pytest.mark.parametrize("bad", [999, -5, 300, True, 1.5, "255"])
+@pytest.mark.parametrize("slot", ["r", "g", "b"])
+def test_set_color_rejects_out_of_range_components(bad, slot):
     ec = RecordingEc()
-    kb.set_color(ec, r=999, g=-5, b=300)
-    tail = ec.writes[-5:]
-    assert tail[1] == (mailbox.FBUF, 255)  # blue clamped
-    assert tail[2] == (mailbox.FBF1, 255)  # red clamped
-    assert tail[3] == (mailbox.FBF2, 0)    # green clamped
+    colour = {"r": 0, "g": 0, "b": 0, slot: bad}
+    with pytest.raises(ValueError):
+        kb.set_color(ec, **colour)
 
 
 def test_set_brightness_writes_level_after_enable():

@@ -8,6 +8,8 @@ ec_probe log is *empty*, not merely that the D-Bus call happened.
 """
 from __future__ import annotations
 
+import pytest
+
 from conftest import source_text
 
 DOORBELL = (0xF8, 0xC1)
@@ -113,11 +115,12 @@ def test_the_hot_and_slow_guard_uses_the_daemon_temperature(sandbox):
     assert sandbox.dbus_calls() == []
 
 
-def test_force_overrides_the_hot_and_slow_guard_in_daemon_mode(sandbox):
+def test_obsolete_force_cannot_override_the_hot_and_slow_guard(sandbox):
     sandbox.props["Telemetry"] = "(uuuuuu) 91 60 4200 4000 60 56"
     result = sandbox.run("gfan", "20", "--force", daemon=True)
-    assert result.returncode == 0, result.output
-    assert sandbox.dbus_calls() == [["SetFanDuty", "uu", "0", "20"]]
+    assert result.returncode != 0
+    assert "obsolete" in result.output and "refusing" in result.output
+    assert sandbox.dbus_calls() == []
 
 
 # --- when it cannot tell ------------------------------------------------------
@@ -219,15 +222,41 @@ def test_a_direct_write_proceeds_once_the_lock_is_free(sandbox):
     assert sandbox.ec_writes
 
 
-def test_g5_ge_is_a_verified_model_in_both_tools():
-    """G5 GE passed gate G2 on real hardware 2026-10-26 (both fans driven
-    to 80% and handed back — docs/PROTOCOL.md): both CLIs must list it with
-    the verified G6 KF, before the generic G5* allowance."""
+def test_both_tools_gate_writes_on_the_daemon_allowlist():
+    """Writes mirror daemon/gigactld/platform.py exactly: GIGABYTE G5 GE on
+    BIOS FB06, or GIGABYTE G6 KF (BIOS coverage unrecorded). Similar names are
+    refused — the old G5*/G6*/G7* 'note and continue' path and the UNSAFE
+    write bypasses are gone."""
     for tool in ("gfan", "gkbd"):
         body = source_text(tool)
-        assert '"G6 KF"|"G5 GE")' in body, f"{tool} does not verify the G5 GE"
-        assert body.index('"G6 KF"|"G5 GE")') < body.index("G5*|G6*|G7*"), \
-            f"{tool} lets the generic G5* case reach the G5 GE first"
+        assert '"G5 GE")' in body and '"G6 KF")' in body, tool
+        for forbidden in ("G5*|G6*|G7*", "_UNSAFE"):
+            assert forbidden not in body, f"{tool} still carries {forbidden}"
+
+
+@pytest.mark.parametrize("tool,args", [("gfan", ["70"]), ("gfan", ["auto"]),
+                                       ("gkbd", ["red"]), ("gkbd", ["apply"])])
+@pytest.mark.parametrize("dmi,reason", [
+    ({"STUB_DMI_VENDOR": "ACME"}, "unsupported"),
+    ({"STUB_DMI_MODEL": "G5 KF"}, "unsupported"),
+    ({"STUB_DMI_MODEL": "G6 Kf"}, "unsupported"),  # near-miss name, not the allowlist
+    ({"STUB_DMI_MODEL": "G7 KE"}, "unsupported"),
+    ({"STUB_DMI_MODEL": "G5 GE", "STUB_DMI_BIOS": "FB05"}, "require BIOS FB06"),
+    ({"STUB_DMI_MODEL": "G5 GE", "STUB_DMI_BIOS": ""}, "require BIOS FB06"),
+])
+def test_direct_writes_refuse_machines_outside_the_daemon_allowlist(sandbox, tool, args, dmi, reason):
+    result = sandbox.run(tool, *args, daemon=False, extra_env=dmi)
+    assert result.returncode != 0
+    assert reason in result.output
+    assert sandbox.ec_writes == []
+
+
+@pytest.mark.parametrize("tool,args", [("gfan", ["70"]), ("gkbd", ["red"])])
+def test_allowlisted_g6_kf_accepts_unrecorded_bios(sandbox, tool, args):
+    result = sandbox.run(tool, *args, daemon=False,
+                         extra_env={"STUB_DMI_MODEL": "G6 KF",
+                                    "STUB_DMI_BIOS": "any-bios"})
+    assert result.returncode == 0, result.output
 
 
 def test_the_lock_is_the_one_the_daemon_takes():

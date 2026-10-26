@@ -15,6 +15,7 @@ ordinary user in a tmp dir.
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import shlex
 import shutil
@@ -63,6 +64,15 @@ fail_when = os.environ.get("STUB_FAIL_WHEN", "")
 daemon = os.environ.get("STUB_DAEMON", "0")
 
 if "NameHasOwner" in args:
+    sequence = os.environ.get("STUB_DAEMON_SEQUENCE")
+    if sequence:
+        count = sum("NameHasOwner" in line for line in open(log))
+        values = sequence.split(",")
+        daemon = values[min(count - 1, len(values) - 1)]
+    if os.environ.get("STUB_DAEMON_FILE"):
+        daemon = open(os.environ["STUB_DAEMON_FILE"]).read().strip()
+    if os.environ.get("STUB_BUS_REPLY_MARKER"):
+        open(os.environ["STUB_BUS_REPLY_MARKER"], "w").write(daemon)
     if daemon == "error":
         print("Failed to connect to system bus: No such file or directory",
               file=sys.stderr)
@@ -94,7 +104,7 @@ _EC_PROBE = r'''#!/usr/bin/python3
 """Recording stand-in for ec_probe. Reads come from STUB_REGS (offset -> value),
 defaulting to 0; a fan-duty doorbell echoes into that fan's duty register the way
 the real EC does, so gfan's read-back verification converges."""
-import json, os, sys
+import fcntl, json, os, signal, sys
 
 args = sys.argv[1:]
 log = os.environ["STUB_LOG_DIR"] + "/ec_probe.log"
@@ -103,8 +113,9 @@ regs_path = os.environ["STUB_LOG_DIR"] + "/regs.json"
 if os.path.exists(regs_path):
     regs = json.load(open(regs_path))
 else:
-    regs = {str(int(k, 0)): v for k, v in
-            json.loads(os.environ.get("STUB_REGS", "{}")).items()}
+    initial = {"0x07": 55, "0x0A": 45}
+    initial.update(json.loads(os.environ.get("STUB_REGS", "{}")))
+    regs = {str(int(k, 0)): v for k, v in initial.items()}
 
 def save():
     json.dump(regs, open(regs_path, "w"))
@@ -112,21 +123,49 @@ def save():
 with open(log, "a") as f:
     f.write(" ".join(args) + "\n")
 
+# Even reads and recovery must retain BOTH real locks. A separate open file
+# description cannot acquire either lock while the client holds its fd8/fd9.
+for fd, name in ((8, "GIGACTL_OWNER_LOCK"), (9, "GIGACTL_EC_LOCK")):
+    path = os.environ.get(name) or os.environ["OWNER_LOCK"]
+    held, expected = os.fstat(fd), os.stat(path)
+    if (held.st_dev, held.st_ino) != (expected.st_dev, expected.st_ino):
+        print("fake EC called with wrong lock fd: " + name, file=sys.stderr)
+        sys.exit(98)
+    with open(path, "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            print("fake EC called without held lock: " + name, file=sys.stderr)
+            sys.exit(98)
+
+call = " ".join(args)
+count = sum(line.strip() == call for line in open(log))
+rule = next((rule for rule in json.loads(os.environ.get("STUB_EC_RULES", "[]"))
+             if rule["call"] == call and rule.get("occurrence", 1) == count), {})
+status = rule.get("status", 0)
+
 if args[0] == "read":
-    print(regs.get(str(int(args[1], 0)), 0))
+    if status == 0:
+        print(rule.get("output", regs.get(str(int(args[1], 0)), 0)))
 elif args[0] == "write":
     off, val = int(args[1], 0), int(args[2], 0)
-    regs[str(off)] = val
-    if off == 0xF8 and val == 0xC1:            # fan doorbell
-        fan, duty = regs.get(str(0xF9)), regs.get(str(0xFA), 0)
-        if fan == 1:
-            regs[str(0xCE)] = duty
-        elif fan == 2:
-            regs[str(0xCF)] = duty
-    save()
+    if status == 0 or rule.get("apply", False):
+        regs[str(off)] = val
+        if off == 0xF8 and val == 0xC1:            # fan doorbell
+            fan, duty = regs.get(str(0xF9)), regs.get(str(0xFA), 0)
+            if fan == 1:
+                regs[str(0xCE)] = duty
+            elif fan == 2:
+                regs[str(0xCF)] = duty
+        save()
 else:
     print(f"stub ec_probe: unhandled {args}", file=sys.stderr)
     sys.exit(2)
+if rule.get("signal"):
+    os.kill(os.getppid(), getattr(signal, "SIG" + rule["signal"]))
+sys.exit(status)
 '''
 
 _ID = '#!/bin/sh\n# pretend to be root so the direct path does not re-exec us\necho 0\n'
@@ -155,6 +194,7 @@ class Sandbox:
         self.state_dir = tmp_path / "state"
         self.state_dir.mkdir()
         self.lock = tmp_path / "gigactl-ec.lock"
+        self.owner_lock = tmp_path / "owner.lock"
         self.props = dict(DEFAULT_PROPS)
         for name, body in (("busctl", _BUSCTL), ("ec_probe", _EC_PROBE),
                            ("id", _ID), ("sudo", _SUDO)):
@@ -172,7 +212,7 @@ class Sandbox:
             for stub in ("ec_probe", "id", "sudo"):
                 (d / stub).symlink_to(self.bin / stub)
             for tool in ("cat", "readlink", "dirname", "awk", "flock", "sleep",
-                         "mkdir", "rm", "date", "clear"):
+                         "mkdir", "rm", "date", "clear", "stat", "env"):
                 real = shutil.which(tool)
                 if real:
                     (d / tool).symlink_to(real)
@@ -198,15 +238,34 @@ class Sandbox:
             "STUB_FAIL_MESSAGE": fail_message,
             "STUB_REGS": json.dumps(regs or {}),
             "GIGACTL_EC_LOCK": str(self.lock),
+            "GIGACTL_OWNER_LOCK": str(self.owner_lock),
+            # Direct-mode tests opt in explicitly, always with the fake EC and
+            # temporary locks above. Gate-refusal tests override this to "0".
+            "GIGACTL_ALLOW_DIRECT": "1",
             "GFAN_EC_PROBE": str(self.bin / "ec_probe"),
             "GKBD_EC_PROBE": str(self.bin / "ec_probe"),
             "GFAN_STATE": str(self.state_dir / "gfan.mode"),
             "GKBD_STATE_DIR": str(self.state_dir / "gkbd"),
-            # model_check is pre-existing behaviour and reads real DMI; skip it so
-            # the suite passes on any machine.
-            "GFAN_UNSAFE": "1",
-            "GKBD_UNSAFE": "1",
         })
+        # model_check reads host DMI at script start. Point those reads at a
+        # fake allowlisted identity by shadowing `cat` for the DMI paths only;
+        # every other cat invocation delegates to the real binary. Tests that
+        # exercise the guard itself override this via extra_env
+        # (STUB_DMI_VENDOR / STUB_DMI_MODEL / STUB_DMI_BIOS).
+        (self.bin / "cat").write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            "  */sys/class/dmi/id/sys_vendor) printf '%s\\n' "
+            '"${STUB_DMI_VENDOR-GIGABYTE}" ;;\n'
+            "  */sys/class/dmi/id/product_name) printf '%s\\n' "
+            '"${STUB_DMI_MODEL-G5 GE}" ;;\n'
+            "  */sys/class/dmi/id/bios_version) printf '%s\\n' "
+            '"${STUB_DMI_BIOS-FB06}" ;;\n'
+            '  *) exec "$REAL_CAT" "$@" ;;\n'
+            "esac\n")
+        cat = self.bin / "cat"
+        cat.chmod(cat.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+        env["REAL_CAT"] = shutil.which("cat") or "/usr/bin/cat"
         if unprivileged:
             # let the script see a non-root uid, so the sudo re-exec is exercised
             (self.bin / "id").write_text("#!/bin/sh\necho 1000\n")
@@ -250,9 +309,19 @@ class Sandbox:
         return [shlex.split(line)[-1] for line in self._log("busctl")
                 if "get-property" in line]
 
-    def hold_lock(self):
-        """Hold the EC lock the way a concurrent invocation would."""
-        return subprocess.Popen(["flock", "-x", str(self.lock), "sleep", "60"])
+    def hold_lock(self, *, owner=False):
+        """Synchronous acquisition, without a sleep process that could leak."""
+        handle = (self.owner_lock if owner else self.lock).open("a")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+
+        class Holder:
+            def kill(self):
+                handle.close()
+
+            def wait(self):
+                return 0
+
+        return Holder()
 
 
 @pytest.fixture

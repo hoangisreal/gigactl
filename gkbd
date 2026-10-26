@@ -9,9 +9,9 @@
 #     an unprivileged D-Bus client: no root, no ec_probe, no register writes — and
 #     it deliberately does not touch its own store, because two stores for one
 #     backlight is how a stale colour wins a race.
-#   direct — the daemon is definitely not running, so gkbd drives the EC itself as
-#     it always has, keeping its own store and holding the daemon's EC lock so
-#     concurrent invocations serialise. When it *cannot tell*, it refuses rather
+#   direct — opted-in writes with the daemon definitely absent, keeping its own
+#     store and holding the controller lifetime lease before the EC mailbox lock.
+#     When it *cannot tell*, it refuses rather
 #     than guessing direct.
 #
 # Protocol (reverse-engineered 2026-07, cross-checked with tuxedo clevo-keyboard driver):
@@ -37,16 +37,20 @@ STATE=$STATE_DIR/state
 
 MODEL=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
 VENDOR=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true)
+BIOS=$(cat /sys/class/dmi/id/bios_version 2>/dev/null || true)
 
 model_check() {
-  [ "${GKBD_UNSAFE:-0}" = "1" ] && return 0
-  case "$VENDOR" in GIGABYTE*|Gigabyte*) ;; *)
-    die "vendor '$VENDOR' unsupported — verified on Gigabyte G6 KF only. GKBD_UNSAFE=1 to override." ;;
-  esac
+  # Mirror the privileged daemon's exact allowlist (daemon/gigactld/platform.py):
+  # GIGABYTE G5 GE on BIOS FB06, or GIGABYTE G6 KF (BIOS coverage unrecorded).
+  # Similar model names are refused, not warned through.
+  [ "$VENDOR" = "GIGABYTE" ] || \
+    die "vendor '$VENDOR' unsupported — writes require a GIGABYTE machine (allowlist: G5 GE BIOS FB06, G6 KF)."
   case "$MODEL" in
-    "G6 KF"|"G5 GE") ;;  # verified live (G5 GE fans: gate G2, 2026-10-26)
-    G5*|G6*|G7*) echo "gkbd: note: '$MODEL' untested (verified on G6 KF)." >&2 ;;
-    *) die "model '$MODEL' unsupported — verified on Gigabyte G6 KF only. GKBD_UNSAFE=1 to override." ;;
+    "G5 GE")
+      [ "$BIOS" = "FB06" ] || \
+        die "G5 GE writes require BIOS FB06 (found '${BIOS:-unreadable}')." ;;
+    "G6 KF") ;;
+    *) die "model '$MODEL' unsupported for writes — allowlist: GIGABYTE G5 GE (BIOS FB06) or G6 KF. Reads still work." ;;
   esac
 }
 
@@ -78,11 +82,11 @@ daemon_apply() {
 # --- direct mode --------------------------------------------------------------
 
 send() { # $1=FDAT $2=FBUF [$3=FBF1 $4=FBF2] $5=doorbell
-  "$EP" write 0xF9 "$1" >/dev/null
-  "$EP" write 0xFA "$2" >/dev/null
-  [ -n "${3:-}" ] && "$EP" write 0xFB "$3" >/dev/null
-  [ -n "${4:-}" ] && "$EP" write 0xFC "$4" >/dev/null
-  "$EP" write 0xF8 "${5:-0xCA}" >/dev/null
+  "$EP" write 0xF9 "$1" >/dev/null || return $?
+  "$EP" write 0xFA "$2" >/dev/null || return $?
+  if [ -n "${3:-}" ]; then "$EP" write 0xFB "$3" >/dev/null || return $?; fi
+  if [ -n "${4:-}" ]; then "$EP" write 0xFC "$4" >/dev/null || return $?; fi
+  "$EP" write 0xF8 "${5:-0xCA}" >/dev/null || return $?
 }
 
 master_enable()  { send 0x0C 0x3F "" "" 0xC4; }
@@ -100,7 +104,6 @@ saved_brightness() { # the level to keep when only the colour changes
 
 direct_set_color() { # $1=R $2=G $3=B
   local br; br=$(saved_brightness)
-  lock_ec
   master_enable
   set_bright "$br"
   set_color "$1" "$2" "$3"
@@ -109,7 +112,6 @@ direct_set_color() { # $1=R $2=G $3=B
 
 direct_set_brightness() { # $1=percent
   local lvl=$(( $1 * 255 / 100 )) r g b
-  lock_ec
   master_enable
   set_bright "$lvl"
   if [ -f "$STATE" ]; then
@@ -120,7 +122,6 @@ direct_set_brightness() { # $1=percent
 }
 
 direct_set_enabled() { # $1=true|false
-  lock_ec
   if [ "$1" = true ]; then
     master_enable
     if [ -f "$STATE" ]; then
@@ -153,7 +154,6 @@ direct_apply() {
   [ -f "$STATE" ] || { echo "gkbd: no saved state yet"; return 0; }
   local r g b br
   read -r r g b br < "$STATE"
-  lock_ec
   master_enable
   set_bright "${br:-255}"
   set_color "$r" "$g" "$b"
@@ -197,8 +197,10 @@ Usage:
 
 With the gigactl daemon running, gkbd drives it over D-Bus, needs no root, and the
 daemon is what remembers your colour across reboot and suspend. Without it, gkbd
-writes the EC directly, keeps its own saved state and re-runs itself under sudo.
-If it cannot tell whether the daemon is running, it refuses rather than guesses.
+writes require explicit GIGACTL_ALLOW_DIRECT=1 and root/sudo. Direct commands
+hold the controller owner lease for their whole operation, before the mailbox
+lock; a running daemon never permits direct fallback. An unknown bus state
+refuses access rather than guessing.
 EOF
 }
 
@@ -209,9 +211,9 @@ main() {
 
   detect_mode
   if [ "$MODE" = direct ]; then
-    # Only the direct path needs the tool and the privileges to use it.
-    [ -x "$EP" ] || die "ec_probe not found (nbfc-linux package), and the gigactl daemon is not running"
-    if [ "$(id -u)" -ne 0 ]; then exec sudo "$0" "$@"; fi
+    local write=1
+    [ "$1" = status ] && write=0
+    prepare_direct "$write" "$@"
   fi
 
   case "$1" in

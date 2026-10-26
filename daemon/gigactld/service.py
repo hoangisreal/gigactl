@@ -6,6 +6,7 @@ exposes fan-control methods (all gated by polkit).
 """
 from __future__ import annotations
 
+import copy
 import signal
 import time
 
@@ -15,8 +16,9 @@ gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
 from . import __version__  # noqa: E402
-from . import authz, curve, ec as ec_mod, fans, keyboard, mailbox, state, turbo  # noqa: E402
-from .telemetry import read_telemetry  # noqa: E402
+from . import authz, curve, ec as ec_mod, fans, keyboard, safety, state, turbo  # noqa: E402
+from .fan_control import FanControl  # noqa: E402
+from .telemetry import InvalidTelemetry, read_telemetry  # noqa: E402
 
 _ERR = "io.github.smairio.gigactl.Error"
 
@@ -86,6 +88,8 @@ INTROSPECTION_XML = f"""
          False where the knob does not exist at all. -->
     <property name="TurboBoost" type="b" access="read"/>
     <property name="TurboAvailable" type="b" access="read"/>
+    <property name="FanControlState" type="s" access="read"/>
+    <property name="TelemetryStatus" type="s" access="read"/>
   </interface>
 </node>
 """
@@ -116,9 +120,16 @@ class Daemon:
     # failsafe and hand them back to firmware (docs/PLAN.md T2.1).
     FAILSAFE_AFTER_TICKS = 3
 
+    MAX_SAMPLE_AGE_S = 6.0
+
     def __init__(self, ec, interval_s: int = 2,
-                 authorizer: authz.Authorizer | None = None) -> None:
+                 authorizer: authz.Authorizer | None = None,
+                 clock=time.monotonic) -> None:
+        if not 1 <= interval_s <= 3:
+            raise ValueError("poll interval must be between 1 and 3 seconds")
         self.ec = ec
+        self.clock = clock
+        self.control = FanControl(ec, clock=clock)
         self.interval_s = interval_s
         self.authorizer = authorizer or authz.Authorizer()
         self._conn: Gio.DBusConnection | None = None
@@ -142,9 +153,26 @@ class Daemon:
         self._last_ec_status = ""
         self._tick_failures = 0
         self._failsafe_tripped = False
+        self._recovery_reason = ""
+        self._manual_targets: dict[int, int] = {}
+        self._durable_fan_state: dict | None = None
+        self._owns_name = False
+        self._started = False
+        self._suspended = False
+        self._suspend_profile: dict | None = None
+        self._fan_generation = 0
+        self._telemetry = None
+        self._sampled_at: float | None = None
+        self._watchdog = None
+        self._last_control_state = ""
+        self._last_telemetry_status = ""
+        self._last_turbo = None
 
     # --- lifecycle -----------------------------------------------------------
     def run(self) -> None:
+        from .watchdog import Watchdog
+
+        self._watchdog = Watchdog.from_environment()
         Gio.bus_own_name(
             Gio.BusType.SYSTEM,
             BUS_NAME,
@@ -164,18 +192,18 @@ class Daemon:
         # leaves them frozen. (Crash is covered by `gigactld --restore-firmware`
         # in the unit's ExecStopPost.)
         print("gigactld: shutting down; handing fans back to firmware", flush=True)
-        try:
-            for f in fans.FANS:
-                fans.restore_auto(self.ec, f)
-        except Exception as exc:
-            print(f"gigactld: firmware restore on shutdown failed: {exc}", flush=True)
+        if self._owns_name:
+            self._owns_name = False
+            self._fan_generation += 1
+            self.control.restore_all()
+            print(f"gigactld: {self.control.handback_status()}", flush=True)
         self._loop.quit()
         return GLib.SOURCE_REMOVE
 
     def _on_bus_acquired(self, conn: Gio.DBusConnection, name: str) -> None:
         self._conn = conn
-        # introspection/property registration is best-effort: even if a
-        # PyGObject quirk rejects it, the Telemetry broadcast below still works.
+        # Acquiring a connection is NOT acquiring the well-known name. Do not
+        # restore state or touch hardware until _on_name_acquired.
         try:
             conn.register_object(
                 OBJECT_PATH,
@@ -185,21 +213,30 @@ class Daemon:
                 None,                # set_property
             )
         except Exception as exc:  # pragma: no cover - environment dependent
-            print(f"gigactld: object registration skipped ({exc})", flush=True)
-        self._restore_saved_state()
-        self._subscribe_sleep(conn)
-        GLib.timeout_add_seconds(self.interval_s, self._tick)
-        self._tick()  # emit + apply immediately, don't wait a full interval
+            print(f"gigactld: object registration failed ({exc})", flush=True)
+            self._loop.quit()
 
     def _restore_saved_state(self) -> None:
         data = state.load(self.state_path)
         if not data:
             return
         try:
+            state.validate(data)
             state.restore(self.engine, data)
+            if data.get("recovery_latched", False):
+                self.engine.set_profile(curve.FIRMWARE)
+                self._failsafe_tripped = True
+                self._recovery_reason = "saved safety latch; explicit profile selection required"
+                self._engine_fault = self._recovery_reason
+                # A previous process may have died before handback completed.
+                # Never infer physical firmware ownership from the JSON latch.
+                self.control.pending_auto.update(fans.FANS)
+            self._durable_fan_state = state.snapshot(self.engine)
             print(f"gigactld: restored profile '{self.engine.profile}'", flush=True)
         except Exception as exc:
+            self.engine.set_profile(curve.FIRMWARE)
             print(f"gigactld: could not restore saved profile: {exc}", flush=True)
+            return  # validate the ENTIRE snapshot before any optional writes
         # Keyboard is optional: only re-apply if we actually saved one, so a
         # fresh install doesn't force the firmware default onto the backlight.
         kd = data.get("keyboard")
@@ -208,7 +245,7 @@ class Daemon:
             self._apply_keyboard("boot")
         # Turbo likewise: only re-apply a choice made through the daemon.
         if "turbo_enabled" in data:
-            self._turbo_choice = bool(data["turbo_enabled"])
+            self._turbo_choice = data["turbo_enabled"]
             try:
                 self.turbo.set_enabled(self._turbo_choice)
                 print(f"gigactld: turbo {'enabled' if self._turbo_choice else 'disabled'} (restored)", flush=True)
@@ -245,13 +282,52 @@ class Daemon:
             print(f"gigactld: could not subscribe to logind sleep signal ({exc})", flush=True)
 
     def _on_prepare_for_sleep(self, conn, sender, path, iface, signal_name, params):
-        # PrepareForSleep(true) fires before sleep, (false) after resume; the
-        # backlight only needs re-driving on the resume edge.
+        if not self._owns_name:
+            return
         (going_to_sleep,) = params.unpack()
-        if not going_to_sleep:
-            self._apply_keyboard("resume")
+        self._fan_generation += 1  # invalidate pending authorization callbacks
+        if going_to_sleep:
+            self._suspended = True
+            self._suspend_profile = (state.snapshot(self.engine)
+                                     if self.engine.profile != curve.MANUAL else None)
+            self._manual_targets.clear()
+            if self.engine.profile != curve.FIRMWARE or self.control.targets:
+                self.engine.set_profile(curve.FIRMWARE)
+                if not self.control.restore_all():
+                    self._enter_recovery("suspend handback failed", restore=False)
+            self._telemetry = None
+            self._sampled_at = None
+            return
+        self._suspended = False
+        self.control.targets.clear()
+        self._telemetry = None
+        self._sampled_at = None
+        if not self._failsafe_tripped and self._suspend_profile:
+            state.restore(self.engine, self._suspend_profile)
+        self._suspend_profile = None
+        self.engine.retry_next_tick()
+        if self.engine.profile != curve.FIRMWARE and not self._failsafe_tripped:
+            try:
+                self._apply_now()  # fresh sample; cached pre-sleep targets are invalid
+            except Exception as exc:
+                self._enter_recovery(f"resume reconciliation failed: {exc}")
+        self._apply_keyboard("resume")
+        self._notify_fan_state()
 
     def _on_name_acquired(self, conn, name: str) -> None:
+        if conn is not None:
+            self._conn = conn
+        self._owns_name = True
+        if not self._started:
+            self._started = True
+            # Schedule safety before restoring potentially malformed state.
+            GLib.timeout_add_seconds(self.interval_s, self._tick)
+            if self._watchdog is not None and self._watchdog.interval_s:
+                GLib.timeout_add_seconds(max(1, int(self._watchdog.interval_s)),
+                                         self._heartbeat)
+            self._subscribe_sleep(self._conn)
+            self._restore_saved_state()
+            self._tick()
         print(f"gigactld: owning {name} (EC backend: {self.ec.backend.name})", flush=True)
         # Say it here as well as on the property: a user asking "why is nothing
         # happening" reaches for systemctl status long before they think to
@@ -262,7 +338,18 @@ class Daemon:
 
     def _on_name_lost(self, conn, name: str) -> None:
         print(f"gigactld: lost name {name}; is another instance running?", flush=True)
+        if self._owns_name:
+            self._owns_name = False
+            self._fan_generation += 1
+            self.control.restore_all()
         self._loop.quit()
+
+    def _heartbeat(self) -> bool:
+        # Deliberately runs on the SAME event loop as control/authorization.
+        # A separate heartbeat thread would conceal a hung controller.
+        if self._owns_name and self._watchdog is not None:
+            self._watchdog.ping()
+        return GLib.SOURCE_CONTINUE
 
     # --- D-Bus surface -------------------------------------------------------
     def _get_property(self, conn, sender, path, iface, prop):
@@ -273,11 +360,9 @@ class Daemon:
         if prop == "EcStatus":
             return GLib.Variant("s", self.ec_status())
         if prop == "Telemetry":
-            try:
-                t = read_telemetry(self.ec)
-            except Exception as exc:  # reached from the GLib dispatcher
-                print(f"gigactld: telemetry read failed: {exc}", flush=True)
+            if not self._sample_fresh():
                 return None
+            t = self._telemetry
             return GLib.Variant("(uuuuuu)",
                                 (t.cpu_temp, t.gpu_temp, t.fan1_rpm, t.fan2_rpm,
                                  t.fan1_duty_pct, t.fan2_duty_pct))
@@ -292,6 +377,10 @@ class Daemon:
                 return GLib.Variant("b", self.turbo.enabled())
             except turbo.TurboUnavailable:
                 return GLib.Variant("b", False)
+        if prop == "FanControlState":
+            return GLib.Variant("s", self.control_state())
+        if prop == "TelemetryStatus":
+            return GLib.Variant("s", self.telemetry_status())
         return None
 
     def ec_status(self) -> str:
@@ -303,7 +392,27 @@ class Daemon:
         # A read-only EC outranks a generic write failure: both are true at
         # once when the module lacks write support, and only one of them tells
         # the user what to do about it.
-        return self.ec.unwritable_reason() or self._engine_fault or ""
+        return (self.ec.unwritable_reason() or self._engine_fault or
+                ("fan target awaiting readback verification"
+                 if self.control.pending_duties else ""))
+
+    def control_state(self) -> str:
+        if self._suspended:
+            return "suspended"
+        if self.control.pending_auto:
+            return "recovery-unconfirmed"
+        if self._failsafe_tripped:
+            return "safety-latched"
+        if self.control.pending_duties:
+            return "verifying"
+        return "firmware-requested" if self.engine.profile == curve.FIRMWARE else "software-controlled"
+
+    def telemetry_status(self) -> str:
+        if not self._sample_fresh():
+            return "unavailable or stale"
+        if not self._telemetry.gpu_available:
+            return "CPU valid; GPU sensor unavailable or asleep"
+        return "valid"
 
     def _sync_ec_status(self) -> None:
         """Log and announce the EC status, but only when it changes.
@@ -313,12 +422,22 @@ class Daemon:
         this happens, and should not need restarting to notice.
         """
         status = self.ec_status()
-        if status == self._last_ec_status:
-            return
-        self._last_ec_status = status
-        print(f"gigactld: {status}" if status
-              else "gigactld: the EC is accepting writes again", flush=True)
-        self._notify_properties(EcStatus=GLib.Variant("s", status))
+        changed = {}
+        if status != self._last_ec_status:
+            self._last_ec_status = status
+            print(f"gigactld: {status}" if status
+                  else "gigactld: the EC is accepting writes again", flush=True)
+            changed["EcStatus"] = GLib.Variant("s", status)
+        phase = self.control_state()
+        if phase != self._last_control_state:
+            self._last_control_state = phase
+            changed["FanControlState"] = GLib.Variant("s", phase)
+        telemetry_status = self.telemetry_status()
+        if telemetry_status != self._last_telemetry_status:
+            self._last_telemetry_status = telemetry_status
+            changed["TelemetryStatus"] = GLib.Variant("s", telemetry_status)
+        if changed:
+            self._notify_properties(**changed)
 
     def _notify_properties(self, **changed: GLib.Variant) -> None:
         """Emit ``PropertiesChanged`` so a running GUI or tray reflects state it
@@ -341,12 +460,56 @@ class Daemon:
         """Profile and curves always change together — one emission covers both."""
         self._notify_properties(
             ActiveProfile=GLib.Variant("s", self.engine.profile),
-            Curves=_curves_variant(self.engine))
+            Curves=_curves_variant(self.engine),
+            FanControlState=GLib.Variant("s", self.control_state()))
 
     def _notify_keyboard(self) -> None:
         self._notify_properties(KeyboardState=_keyboard_variant(self.keyboard))
 
     def _method_call(self, conn, sender, path, iface, method, params, invocation):
+        actions = {
+            "SetFanDuty": authz.ACTION_CONTROL_FANS,
+            "RestoreFirmware": authz.ACTION_CONTROL_FANS,
+            "SetProfile": authz.ACTION_CONTROL_FANS,
+            "SetCurve": authz.ACTION_CONTROL_FANS,
+            "SetKeyboardColor": authz.ACTION_CONTROL_KEYBOARD,
+            "SetKeyboardBrightness": authz.ACTION_CONTROL_KEYBOARD,
+            "SetKeyboardEnabled": authz.ACTION_CONTROL_KEYBOARD,
+            "SetTurboBoost": authz.ACTION_CONTROL_CPU,
+        }
+        if method not in actions:
+            invocation.return_dbus_error(f"{_ERR}.UnknownMethod", method)
+            return
+        if not self._owns_name or self._suspended:
+            invocation.return_dbus_error(f"{_ERR}.Unavailable", "controller not active")
+            return
+        fan_request = actions[method] == authz.ACTION_CONTROL_FANS
+        if fan_request:
+            self._fan_generation += 1
+        generation = self._fan_generation
+
+        def authorized(allowed):
+            if not allowed:
+                invocation.return_dbus_error(f"{_ERR}.NotAuthorized", "authorization refused")
+            elif not self._owns_name or self._suspended:
+                invocation.return_dbus_error(f"{_ERR}.Unavailable", "controller not active")
+            elif fan_request and generation != self._fan_generation:
+                invocation.return_dbus_error(f"{_ERR}.Superseded", "newer fan request superseded this one")
+            else:
+                self._dispatch(method, sender, params, invocation)
+
+        try:
+            if hasattr(self.authorizer, "check_async"):
+                self.authorizer.check_async(sender, actions[method], authorized)
+            else:
+                # Narrow injection seam for synchronous in-memory authorizers.
+                # Production Authorizer always takes the nonblocking path.
+                authorized(self.authorizer.check(sender, actions[method]))
+        except Exception as exc:
+            invocation.return_dbus_error(f"{_ERR}.NotAuthorized", f"authorization failed: {exc}")
+
+    def _dispatch(self, method, sender, params, invocation):
+        """Private handlers run only after asynchronous boundary authorization."""
         try:
             if method == "SetFanDuty":
                 self._set_fan_duty(sender, params, invocation)
@@ -374,15 +537,6 @@ class Daemon:
         except Exception as exc:  # never let an exception escape into GLib
             invocation.return_dbus_error(f"{_ERR}.Failed", str(exc))
 
-    def _authorized(self, sender, invocation,
-                    action: str = authz.ACTION_CONTROL_FANS,
-                    what: str = "the fans") -> bool:
-        if self.authorizer.check(sender, action):
-            return True
-        invocation.return_dbus_error(
-            f"{_ERR}.NotAuthorized", f"not authorized to control {what}")
-        return False
-
     def _set_fan_duty(self, sender, params, invocation) -> None:
         fan, percent = params.unpack()
         try:
@@ -393,98 +547,102 @@ class Daemon:
         if not 0 <= percent <= 100:
             invocation.return_dbus_error(f"{_ERR}.InvalidArgs", f"bad percent {percent}")
             return
-        if not self._authorized(sender, invocation):
-            return
-
-        target_raw = mailbox.pct_to_byte(percent)
-        for f in targets:
-            fans.set_duty(self.ec, f, percent)
-        rejected = self._verify(targets, target_raw)
-        if rejected:
-            # any rejection reverts EVERY fan we touched, not just the bad one,
-            # so a partial failure can't strand a sibling in manual mode.
-            for f in targets:
-                fans.restore_auto(self.ec, f)
-            invocation.return_dbus_error(
-                f"{_ERR}.WriteRejected",
-                f"fan(s) {rejected} did not accept the duty; all reverted to firmware auto")
-            return
-        # manual is a transient override — stop the engine fighting it, but do
-        # NOT persist it; the last real profile stays saved and is restored on
-        # the next start/reboot.
-        self.engine.set_manual()
-        self._failsafe_tripped = False
-        self._tick_failures = 0
+        try:
+            t = self._sample()
+            self._rearm()
+            if self.engine.profile != curve.MANUAL:
+                self._durable_fan_state = state.snapshot(self.engine)
+                self._manual_targets.clear()
+            self._manual_targets.update({f: percent for f in targets})
+            self.engine.set_manual()
+            self._run_engine(t.cpu_temp, t.gpu_temp)
+        except Exception as exc:
+            self._enter_recovery(f"manual fan request failed: {exc}")
+            raise
         self._notify_fan_state()
         invocation.return_value(None)
 
     def _restore_firmware(self, sender, invocation) -> None:
-        if not self._authorized(sender, invocation):
-            return
-        self.engine.set_profile(curve.FIRMWARE)
-        for f in fans.FANS:
-            fans.restore_auto(self.ec, f)
-        self._persist()
-        self._notify_fan_state()
-        invocation.return_value(None)
+        self._set_profile(sender, GLib.Variant("(s)", (curve.FIRMWARE,)), invocation)
 
-    def _verify(self, targets, target_raw: int) -> list:
-        """Return the fans that never took the write. The duty register snaps
-        to the commanded value, so a short settle suffices — no long ramp poll,
-        keeping the main loop responsive."""
-        rejected = list(targets)
-        for _ in range(3):  # ~0.6s total, shared across all fans
-            time.sleep(0.2)
-            rejected = [f for f in rejected
-                        if not fans.duty_matches(target_raw, fans.read_duty(self.ec, f))]
-            if not rejected:
-                return []
-        return rejected
+    def _sample_fresh(self) -> bool:
+        return (not self._suspended and self._telemetry is not None and
+                self._sampled_at is not None and
+                self.clock() - self._sampled_at < self.MAX_SAMPLE_AGE_S)
+
+    def _sample(self):
+        try:
+            t = read_telemetry(self.ec)
+            t.validate()
+        except Exception:
+            self._telemetry = None
+            raise
+        self._telemetry = t
+        self._sampled_at = self.clock()
+        return t
 
     # --- telemetry loop ------------------------------------------------------
     def _tick(self) -> bool:
+        if not self._owns_name or self._suspended:
+            return True
+        if self._failsafe_tripped and self.control.pending_auto:
+            self.control.retry_restore()
+            self._engine_fault = f"{self._recovery_reason}; {self.control.handback_status()}"
         try:
-            t = read_telemetry(self.ec)
-            self._conn.emit_signal(
-                None, OBJECT_PATH, INTERFACE, "Telemetry",
-                GLib.Variant(
-                    "(uuuuuu)",
-                    (t.cpu_temp, t.gpu_temp, t.fan1_rpm, t.fan2_rpm,
-                     t.fan1_duty_pct, t.fan2_duty_pct),
-                ),
-            )
-            self._run_engine(t.cpu_temp, t.gpu_temp, quiet=True)
-            if self._engine_fault and not self._failsafe_tripped:
-                self._note_tick_failure()
-            else:
-                self._tick_failures = 0
+            t = self._sample()
+            if not self._failsafe_tripped:
+                self._run_engine(t.cpu_temp, t.gpu_temp, quiet=True)
+            self._tick_failures = 0
+            try:
+                self._conn.emit_signal(
+                    None, OBJECT_PATH, INTERFACE, "Telemetry",
+                    GLib.Variant("(uuuuuu)",
+                                 (t.cpu_temp, t.gpu_temp, t.fan1_rpm, t.fan2_rpm,
+                                  t.fan1_duty_pct, t.fan2_duty_pct)))
+            except Exception as exc:
+                # A presentation failure is not an EC failure.
+                print(f"gigactld: telemetry delivery failed: {exc}", flush=True)
+        except InvalidTelemetry as exc:
+            self._enter_recovery(str(exc))
         except Exception as exc:
             print(f"gigactld: tick failed: {exc}", flush=True)
-            self._note_tick_failure()
+            self._note_tick_failure(str(exc))
+        self._sync_turbo()
         self._sync_ec_status()
         return True  # keep the timeout running
 
-    def _note_tick_failure(self) -> None:
-        """Count a failed tick; on the threshold, hand the fans to firmware.
-
-        The restore itself is best-effort per fan: the EC refusing writes is
-        one of the failures that lands us here, and that must not stop the
-        profile being dropped — claiming 'max' while nothing drives the fans
-        is the #25 failure this watchdog exists to end.
-        """
+    def _note_tick_failure(self, reason="telemetry failure") -> None:
         self._tick_failures += 1
-        if self._tick_failures < self.FAILSAFE_AFTER_TICKS or self._failsafe_tripped:
+        stale = (self._sampled_at is not None and
+                 self.clock() - self._sampled_at >= self.MAX_SAMPLE_AGE_S)
+        if self._failsafe_tripped:
             return
+        if self._tick_failures >= self.FAILSAFE_AFTER_TICKS or stale:
+            self._enter_recovery(f"repeated or stale telemetry: {reason}")
+
+    def _enter_recovery(self, reason: str, *, restore=True) -> None:
+        first_trip = not self._failsafe_tripped
         self._failsafe_tripped = True
-        for f in fans.FANS:
-            try:
-                fans.restore_auto(self.ec, f)
-            except Exception:
-                pass
+        self._fan_generation += 1
+        self._manual_targets.clear()
         self.engine.set_profile(curve.FIRMWARE)
-        self._engine_fault = (
-            "failsafe: repeated failures driving the fans — handed back "
-            "to firmware auto; pick a profile to take control again")
+        if restore and first_trip:
+            self.control.restore_all()
+        self._recovery_reason = f"failsafe: {reason}"
+        self._engine_fault = f"{self._recovery_reason}; {self.control.handback_status()}"
+        self._persist()
+        self._notify_fan_state()
+
+    def _rearm(self) -> None:
+        if self.control.pending_auto and not self.control.retry_restore():
+            raise ec_mod.EcError(self.control.handback_status())
+        self._failsafe_tripped = False
+        self._tick_failures = 0
+        self._engine_fault = None
+        self._recovery_reason = ""
+        # Retain knowledge of already-controlled fans until they are explicitly
+        # reconciled/released. Clearing it here could strand the other fan when
+        # switching a two-fan curve to a one-fan manual request.
 
     def _run_engine(self, cpu_temp: int, gpu_temp: int, *,
                     quiet: bool = False) -> None:
@@ -496,68 +654,96 @@ class Daemon:
         the exception, so that the request can fail out loud rather than report
         success it did not achieve.
         """
-        for fan in fans.FANS:
-            src = cpu_temp if fan == fans.CPU_FAN else gpu_temp
-            duty = self.engine.decide(fan, src, cpu_temp)
-            if duty is None:
-                continue
-            try:
-                fans.set_duty(self.ec, fan, duty)
-            except Exception as exc:
-                self._engine_fault = (
-                    f"the fan profile '{self.engine.profile}' is not being "
-                    f"applied: {exc}")
-                self.engine.retry_next_tick()
-                if not quiet:
-                    raise
-                return
-        if not self._failsafe_tripped:
+        if self.engine.profile == curve.FIRMWARE:
+            return
+        profile = self.engine.profile
+        try:
+            if profile == curve.MANUAL:
+                duties = {f: safety.safe_duty(p, cpu_temp, gpu_temp)
+                          for f, p in self._manual_targets.items()}
+                emergency = (cpu_temp >= safety.CPU_EMERGENCY_C or
+                             gpu_temp >= safety.GPU_EMERGENCY_C)
+                if emergency:
+                    duties = {f: 100 for f in fans.FANS}
+                else:
+                    for f in set(self.control.targets) - set(duties):
+                        self.control.release(f)
+            else:
+                duties = {}
+                for fan in fans.FANS:
+                    # A missing GPU sample cannot justify low cooling. Use the
+                    # valid CPU sample rather than treating unavailable as 0C.
+                    src = cpu_temp if fan == fans.CPU_FAN or not gpu_temp else gpu_temp
+                    self.engine.decide(fan, src, cpu_temp)
+                    requested = self.engine.requested_duty(fan)
+                    duties[fan] = safety.safe_duty(requested, cpu_temp, gpu_temp)
+            self.control.apply(duties)
             self._engine_fault = None
+        except Exception as exc:
+            self.engine.retry_next_tick()
+            self._enter_recovery(f"profile '{profile}' could not be applied: {exc}")
+            if not quiet:
+                raise
 
     def _apply_now(self) -> None:
-        t = read_telemetry(self.ec)
+        t = self._sample()
         self._run_engine(t.cpu_temp, t.gpu_temp)
 
     def _persist(self) -> None:
         try:
-            state.save(self.state_path, state.snapshot(
-                self.engine, self.keyboard, self._turbo_choice))
+            data = state.snapshot(self.engine, self.keyboard, self._turbo_choice)
+            if self.engine.profile == curve.MANUAL:
+                durable = self._durable_fan_state or {"profile": curve.FIRMWARE,
+                                                     "linked": True, "cpu": [], "gpu": []}
+                data.update({k: durable[k] for k in ("profile", "linked", "cpu", "gpu")})
+            data["recovery_latched"] = self._failsafe_tripped
+            state.save(self.state_path, data)
         except Exception as exc:
             print(f"gigactld: could not persist state: {exc}", flush=True)
 
     # --- profile / curve methods --------------------------------------------
     def _set_profile(self, sender, params, invocation) -> None:
         (name,) = params.unpack()
-        if not self._authorized(sender, invocation):
-            return
+        candidate = copy.deepcopy(self.engine)
         try:
-            self.engine.set_profile(name)
+            candidate.set_profile(name)
         except ValueError as exc:
             invocation.return_dbus_error(f"{_ERR}.InvalidArgs", str(exc))
             return
-        # The user is taking control again: re-arm the failsafe.
-        self._failsafe_tripped = False
-        self._tick_failures = 0
-        self._engine_fault = None
-        if name == curve.FIRMWARE:
-            for f in fans.FANS:
-                fans.restore_auto(self.ec, f)
-        else:
-            self._apply_now()  # take effect immediately, not on the next tick
+        try:
+            self._rearm()
+            self.engine = candidate
+            self._manual_targets.clear()
+            if name == curve.FIRMWARE:
+                if not self.control.restore_all():
+                    raise ec_mod.EcError(self.control.handback_status())
+            else:
+                self._apply_now()
+        except Exception as exc:
+            self._enter_recovery(f"profile '{name}' request failed: {exc}")
+            raise
+        self._durable_fan_state = state.snapshot(self.engine)
         self._persist()
         self._notify_fan_state()
         invocation.return_value(None)
 
     def _set_curve(self, sender, params, invocation) -> None:
         which, points, linked = params.unpack()
-        if not self._authorized(sender, invocation):
-            return
+        candidate = copy.deepcopy(self.engine)
         try:
-            self.engine.set_one_curve(which, points, linked)
+            candidate.set_one_curve(which, points, linked)
         except ValueError as exc:
             invocation.return_dbus_error(f"{_ERR}.InvalidArgs", str(exc))
             return
-        self._apply_now()
+        try:
+            self._rearm()
+            self.engine = candidate
+            self._manual_targets.clear()
+            self._apply_now()
+        except Exception as exc:
+            self._enter_recovery(f"custom curve request failed: {exc}")
+            raise
+        self._durable_fan_state = state.snapshot(self.engine)
         self._persist()
         self._notify_fan_state()
         invocation.return_value(None)
@@ -565,9 +751,6 @@ class Daemon:
     # --- CPU methods ---------------------------------------------------------
     def _set_turbo_boost(self, sender, params, invocation) -> None:
         (enabled,) = params.unpack()
-        if not self._authorized(sender, invocation,
-                                authz.ACTION_CONTROL_CPU, "the CPU turbo"):
-            return
         try:
             self.turbo.set_enabled(enabled)
         except turbo.TurboUnavailable as exc:
@@ -579,10 +762,6 @@ class Daemon:
         invocation.return_value(None)
 
     # --- keyboard methods ----------------------------------------------------
-    def _kbd_authorized(self, sender, invocation) -> bool:
-        return self._authorized(sender, invocation,
-                                authz.ACTION_CONTROL_KEYBOARD, "the keyboard")
-
     def _remember_keyboard(self) -> keyboard.KeyboardState:
         """Keyboard state is created lazily on first use, so a user who only
         ever touches the fans never gets a keyboard section written — and thus
@@ -597,8 +776,6 @@ class Daemon:
             invocation.return_dbus_error(f"{_ERR}.InvalidArgs",
                                          f"colour components must be 0-255: {(r, g, b)}")
             return
-        if not self._kbd_authorized(sender, invocation):
-            return
         keyboard.set_color(self.ec, r, g, b)
         self._remember_keyboard().record_colour(r, g, b)
         self._persist()
@@ -610,8 +787,6 @@ class Daemon:
         if not 0 <= percent <= 100:
             invocation.return_dbus_error(f"{_ERR}.InvalidArgs", f"bad percent {percent}")
             return
-        if not self._kbd_authorized(sender, invocation):
-            return
         keyboard.set_brightness(self.ec, percent)
         self._remember_keyboard().record_brightness(percent)
         self._persist()
@@ -620,8 +795,6 @@ class Daemon:
 
     def _set_keyboard_enabled(self, sender, params, invocation) -> None:
         (on,) = params.unpack()
-        if not self._kbd_authorized(sender, invocation):
-            return
         keyboard.set_enabled(self.ec, on)
         self._remember_keyboard().record_enabled(on)
         self._persist()
@@ -630,3 +803,14 @@ class Daemon:
 
     def stop(self) -> None:
         self._loop.quit()
+
+    def _sync_turbo(self) -> None:
+        """Observe external policy changes; never fight TuneD by reasserting."""
+        try:
+            current = (self.turbo.available(), self.turbo.enabled())
+        except turbo.TurboUnavailable:
+            current = (False, False)
+        if current != self._last_turbo:
+            self._last_turbo = current
+            self._notify_properties(TurboAvailable=GLib.Variant("b", current[0]),
+                                    TurboBoost=GLib.Variant("b", current[1]))

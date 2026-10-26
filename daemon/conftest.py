@@ -6,6 +6,7 @@
 # stand-ins for the D-Bus connection and method invocation. The protocol-level
 # tests (test_fans, test_keyboard, test_mailbox) keep their own narrower fakes.
 from contextlib import nullcontext
+import time
 
 import pytest
 
@@ -23,7 +24,8 @@ class FakeEc:
 
     def __init__(self):
         self.writes = []  # (offset, value) in order
-        self.regs = {}
+        self.regs = {0x07: 45, 0x0A: 40}
+        self.modes = {1: "firmware", 2: "firmware"}
         # Set to a sentence to emulate an EC that reads but will not write —
         # the read-only ec_sys of #25. None means writes land.
         self.unwritable = None
@@ -49,6 +51,13 @@ class FakeEc:
             duty = self.regs.get(mailbox.FBUF, 0)
             if fan in fans.DUTY_REG:
                 self.regs[fans.DUTY_REG[fan]] = duty
+                self.modes[fan] = "manual"
+            elif fan == fans.FAN_AUTO and duty in fans.FANS:
+                self.modes[duty] = "firmware"
+        if off == mailbox.FCMD:
+            # Documented acknowledgement: command consumed, not necessarily
+            # semantic acceptance (silent-rejection tests override the latter).
+            self.regs[mailbox.FCMD] = 0
 
     def read_u8(self, off):
         return self.regs.get(off, 0)
@@ -103,13 +112,21 @@ def make_daemon(tmp_path):
 
     count = 0
 
-    def factory(connected: bool = True):
+    def factory(connected: bool = True, clock=None):
         nonlocal count
         count += 1
-        daemon = Daemon(FakeEc(), authorizer=AllowAllAuthorizer())
+        from gigactld.turbo import TurboControl
+
+        daemon = Daemon(FakeEc(), authorizer=AllowAllAuthorizer(),
+                        clock=clock or time.monotonic)
         daemon.state_path = str(tmp_path / f"state{count}.json")
+        knob = tmp_path / f"no_turbo{count}"
+        knob.write_text("1")
+        daemon.turbo = TurboControl(str(knob))
         if connected:
             daemon._conn = RecordingConn()
+            daemon._owns_name = True
+            daemon._started = True
         return daemon
 
     return factory

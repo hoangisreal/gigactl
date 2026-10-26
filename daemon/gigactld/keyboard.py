@@ -25,8 +25,11 @@ SUB_COLOR = 0x03
 SUB_BRIGHT = 0x06
 
 
-def _clamp8(v: int) -> int:
-    return max(0, min(255, int(v)))
+def _check8(v: int) -> int:
+    """Validate one 8-bit colour component; invalid input raises, never clamps."""
+    if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 255:
+        raise ValueError(f"colour component out of range: {v!r}")
+    return v
 
 
 def set_enabled(ec, on: bool) -> None:
@@ -37,7 +40,7 @@ def set_enabled(ec, on: bool) -> None:
 
 def set_color(ec, r: int, g: int, b: int) -> None:
     set_enabled(ec, True)
-    command(ec, SUB_COLOR, (_clamp8(b), _clamp8(r), _clamp8(g)), doorbell=DOORBELL_KB)  # B,R,G
+    command(ec, SUB_COLOR, (_check8(b), _check8(r), _check8(g)), doorbell=DOORBELL_KB)  # B,R,G
 
 
 def set_brightness(ec, pct: int) -> None:

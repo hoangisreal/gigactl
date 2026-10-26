@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .ec import EcError
+
 # EC register offsets
 CPU_TEMP = 0x07
 GPU_TEMP = 0x0A
@@ -29,6 +31,22 @@ class Telemetry:
     fan2_rpm: int
     fan1_duty_pct: int
     fan2_duty_pct: int
+
+    @property
+    def gpu_available(self) -> bool:
+        # EC zero does not distinguish asleep from an unavailable GPU sensor.
+        return self.gpu_temp != 0
+
+    def validate(self) -> None:
+        if not 1 <= self.cpu_temp <= 125 or not 0 <= self.gpu_temp <= 125:
+            raise InvalidTelemetry("invalid CPU/GPU temperature; fan control refused")
+        if any(not 0 <= duty <= 100 for duty in
+               (self.fan1_duty_pct, self.fan2_duty_pct)):
+            raise InvalidTelemetry("invalid fan duty telemetry")
+
+
+class InvalidTelemetry(EcError):
+    """A successful transport read did not produce a usable thermal sample."""
 
 
 def rpm_from_period(period: int) -> int:

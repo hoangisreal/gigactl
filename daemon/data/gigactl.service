@@ -2,24 +2,32 @@
 Description=GigaControl daemon (fan & keyboard control for Gigabyte G5/G6)
 Documentation=https://github.com/smairio/gigactl
 After=multi-user.target
+StartLimitIntervalSec=60s
+StartLimitBurst=3
 
 [Service]
 Type=dbus
 BusName=io.github.smairio.gigactl
-# The daemon picks its EC backend once, at startup, and prefers the ec_sys
-# debugfs file because the kernel serialises each transaction there; the
-# /dev/port fallback races the kernel's own EC driver. modules-load.d only fires
-# at boot, so without this an install — or any start before that first boot —
-# would come up on the fallback and stay there. Optional (the leading '-') so a
-# kernel without the module still starts the daemon. write_support=1 comes from
-# modprobe.d/gigactl.conf.
-ExecStartPre=-/sbin/modprobe ec_sys
+# The daemon validates the model before opening hardware. Do not load a kernel
+# module or run a separate hardware helper before that guard.
+Environment=PYTHONDONTWRITEBYTECODE=1
+RuntimeDirectory=gigactl
+RuntimeDirectoryMode=0755
+# Preserve the owner.lock inode across stops/restarts and CLI recovery. Removing
+# a locked file would let a second process lock a different inode at this path.
+RuntimeDirectoryPreserve=yes
 ExecStart=/usr/bin/gigactld
+WatchdogSec=15s
+NotifyAccess=main
+TimeoutStartSec=15s
+TimeoutStopSec=8s
+TimeoutAbortSec=5s
+KillMode=control-group
 Restart=on-failure
-RestartSec=2
+RestartSec=2s
 # Failsafe: on any stop (including a crash), hand the fans back to the firmware
 # curve so they can never be left frozen at a stale manual duty.
-ExecStopPost=-/usr/bin/gigactld --restore-firmware
+ExecStopPost=/usr/bin/gigactld --restore-firmware
 
 [Install]
 WantedBy=multi-user.target

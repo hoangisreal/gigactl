@@ -2,12 +2,38 @@
 against a temp file. The /dev/port backend is driven against an emulated EC
 port file below; its real-hardware timing remains unverified."""
 import fcntl
+import io
+import os
+import stat
 from unittest.mock import patch
 
 import pytest
 
+from gigactld import ec as transport
 from gigactld.ec import (DevPortBackend, EcError, EcNotWritable, EcSysBackend,
-                         EmbeddedController)
+                         EmbeddedController, default_backend)
+from gigactld.platform import PlatformError, PlatformInfo
+
+PLATFORM = PlatformInfo("GIGABYTE", "G5 GE", "FB06")
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, duration):
+        self.now += duration
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    value = FakeClock()
+    monkeypatch.setattr(transport.time, "monotonic", value.monotonic)
+    monkeypatch.setattr(transport.time, "sleep", value.sleep)
+    return value
 
 
 class FakePortFile:
@@ -68,29 +94,65 @@ class FakePortFile:
 
 def test_devport_reads_a_register_through_the_handshake():
     fake = FakePortFile()
-    with patch("builtins.open", return_value=fake):
-        assert DevPortBackend("/dev/port").read(0x07) == 0x55
+    with patch("gigactld.ec._open_io", return_value=fake):
+        assert DevPortBackend("emulated-ports").read(0x07) == 0x55
 
 
 def test_devport_writes_a_register_through_the_handshake():
     fake = FakePortFile()
-    with patch("builtins.open", return_value=fake):
-        DevPortBackend("/dev/port").write(0xCE, 0xAB)
+    with patch("gigactld.ec._open_io", return_value=fake):
+        DevPortBackend("emulated-ports").write(0xCE, 0xAB)
     assert fake.regs[0xCE] == 0xAB
 
 
-def test_devport_times_out_when_the_ec_never_clears_ibf():
+def test_devport_times_out_when_the_ec_never_clears_ibf(clock):
     class StuckFile(FakePortFile):
         def read(self, n=1):
             if self.pos == DevPortBackend.CMD:
                 return bytes([DevPortBackend.IBF])
             return super().read(n)
 
-    backend = DevPortBackend("/dev/port")
-    backend._SPINS = 100
-    with patch("builtins.open", return_value=StuckFile()):
+    backend = DevPortBackend("emulated-ports", timeout_s=0.05)
+    with patch("gigactld.ec._open_io", return_value=StuckFile()):
         with pytest.raises(EcError, match="timeout"):
             backend.read(0x07)
+    assert clock.now == pytest.approx(0.05)
+
+
+def test_devport_uses_one_deadline_for_entire_write(clock):
+    class SlowFile(FakePortFile):
+        def write(self, data):
+            clock.now += 0.09
+            return super().write(data)
+
+    with patch("gigactld.ec._open_io", return_value=SlowFile()):
+        with pytest.raises(EcError, match="timeout"):
+            DevPortBackend("emulated-ports", timeout_s=0.25).write(0xCE, 128)
+
+
+def test_devport_waits_for_final_input_consumption(clock):
+    class StuckAfterWrite(FakePortFile):
+        def write(self, data):
+            result = super().write(data)
+            if self.cmd is None:
+                self.status |= DevPortBackend.IBF
+            return result
+
+    with patch("gigactld.ec._open_io", return_value=StuckAfterWrite()):
+        with pytest.raises(EcError, match="timeout"):
+            DevPortBackend("emulated-ports", timeout_s=0.05).write(0xCE, 128)
+
+
+def test_devport_times_out_without_output_buffer(clock):
+    class NoOutput(FakePortFile):
+        def write(self, data):
+            result = super().write(data)
+            self.status &= ~DevPortBackend.OBF
+            return result
+
+    with patch("gigactld.ec._open_io", return_value=NoOutput()):
+        with pytest.raises(EcError, match="timeout"):
+            DevPortBackend("emulated-ports", timeout_s=0.05).read(0x07)
 
 
 def _fill(path, mutate=None):
@@ -103,14 +165,14 @@ def _fill(path, mutate=None):
 
 def test_ecsys_reads_byte_at_offset(tmp_path):
     io = _fill(tmp_path / "io")
-    b = EcSysBackend(str(io))
+    b = EcSysBackend(str(io), str(tmp_path / "absent-write-support"))
     assert b.read(0x07) == 0x07
     assert b.read(0xCE) == 0xCE
 
 
 def test_ecsys_writes_only_target_byte(tmp_path):
     io = _fill(tmp_path / "io")
-    b = EcSysBackend(str(io))
+    b = EcSysBackend(str(io), str(tmp_path / "absent-write-support"))
     b.write(0x10, 0xAB)
     raw = (tmp_path / "io").read_bytes()
     assert raw[0x10] == 0xAB
@@ -126,7 +188,7 @@ def test_ecsys_available_reflects_path(tmp_path):
 def test_controller_read_u8_via_backend(tmp_path):
     io = _fill(tmp_path / "io")
     ec = EmbeddedController(backend=EcSysBackend(str(io)),
-                            lock_path=str(tmp_path / "lock"))
+                            lock_path=str(tmp_path / "lock"), platform_info=PLATFORM)
     with ec.transaction():
         assert ec.read_u8(0x0A) == 0x0A
 
@@ -137,14 +199,15 @@ def test_controller_read_u16_be_is_high_byte_first(tmp_path):
 
     io = _fill(tmp_path / "io", setup)
     ec = EmbeddedController(backend=EcSysBackend(str(io)),
-                            lock_path=str(tmp_path / "lock"))
+                            lock_path=str(tmp_path / "lock"), platform_info=PLATFORM)
     assert ec.read_u16_be(0xD0, 0xD1) == 0x036C
 
 
 def test_transaction_takes_an_exclusive_lock(tmp_path):
     io = _fill(tmp_path / "io")
     lock = tmp_path / "lock"
-    ec = EmbeddedController(backend=EcSysBackend(str(io)), lock_path=str(lock))
+    ec = EmbeddedController(backend=EcSysBackend(str(io)), lock_path=str(lock),
+                            platform_info=PLATFORM)
     with ec.transaction():
         # while the transaction holds LOCK_EX, a non-blocking grab must fail
         with open(lock) as probe:
@@ -155,6 +218,145 @@ def test_transaction_takes_an_exclusive_lock(tmp_path):
             except BlockingIOError:
                 got = False
     assert got is False
+
+
+def test_transaction_contention_has_a_monotonic_deadline(tmp_path, clock):
+    lock = tmp_path / "lock"
+    lock.touch()
+    ec = EmbeddedController(backend=EcSysBackend(str(tmp_path / "unused")),
+                            lock_path=str(lock), platform_info=PLATFORM,
+                            lock_timeout_s=0.05)
+    with lock.open() as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(EcError, match="mailbox.*timeout"):
+            with ec.transaction():
+                pytest.fail("must not enter a contended transaction")
+    assert clock.now == pytest.approx(0.05)
+    with ec.transaction():
+        pass  # timeout did not leak a second held descriptor
+
+
+def test_transaction_lock_is_private_and_does_not_truncate(tmp_path):
+    lock = tmp_path / "lock"
+    lock.write_text("existing evidence")
+    lock.chmod(0o644)
+    ec = EmbeddedController(backend=EcSysBackend(str(tmp_path / "unused")),
+                            lock_path=str(lock), platform_info=PLATFORM)
+    with ec.transaction():
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+        assert lock.read_text() == "existing evidence"
+
+
+def test_transaction_rejects_symlink_lock(tmp_path):
+    target = tmp_path / "target"
+    target.write_text("preserve")
+    link = tmp_path / "lock"
+    link.symlink_to(target)
+    ec = EmbeddedController(backend=EcSysBackend(str(tmp_path / "unused")),
+                            lock_path=str(link), platform_info=PLATFORM)
+    with pytest.raises(OSError):
+        with ec.transaction():
+            pytest.fail("symlink lock accepted")
+    assert target.read_text() == "preserve"
+
+
+def test_default_backend_requires_explicit_raw_opt_in():
+    with patch.object(EcSysBackend, "available", return_value=False):
+        with pytest.raises(EcError, match="native EC backend unavailable"):
+            default_backend()
+        assert isinstance(default_backend(allow_raw=True), DevPortBackend)
+
+
+def test_raw_opt_in_never_bypasses_present_native_backend():
+    with patch.object(EcSysBackend, "available", return_value=True):
+        assert isinstance(default_backend(allow_raw=True), EcSysBackend)
+
+
+def test_controller_refuses_platform_before_selecting_or_accessing_backend():
+    with patch("gigactld.ec.default_backend") as select:
+        with pytest.raises(EcError, match="platform guard"):
+            EmbeddedController(platform_info=PlatformInfo("GIGABYTE", "G5 KF", "FB06"))
+    select.assert_not_called()
+
+
+def test_backend_named_fake_is_not_an_implicit_platform_bypass():
+    fake = type("Fake", (), {"name": "fake"})()
+    with patch("gigactld.ec.require_supported_platform", side_effect=PlatformError("denied")):
+        with pytest.raises(EcError, match="denied"):
+            EmbeddedController(backend=fake)
+
+
+def test_explicit_guard_injection_does_not_read_host_dmi(tmp_path):
+    calls = []
+
+    def guard(info):
+        calls.append(info)
+        return PLATFORM
+
+    with patch("gigactld.ec.require_supported_platform", side_effect=AssertionError("host DMI")):
+        ec = EmbeddedController(backend=EcSysBackend(str(tmp_path / "unused")),
+                                platform_guard=guard)
+    assert calls == [None]
+    assert ec.platform_info == PLATFORM
+
+
+@pytest.mark.parametrize("bad", [-1, 256, 1.5, "1", True, None])
+def test_backends_reject_invalid_offsets_and_values_before_opening(tmp_path, bad):
+    for backend in (EcSysBackend(str(tmp_path / "unused")),
+                    DevPortBackend(str(tmp_path / "unused"))):
+        with patch("gigactld.ec._open_io") as opened:
+            with pytest.raises(ValueError):
+                backend.read(bad)
+            with pytest.raises(ValueError):
+                backend.write(bad, 1)
+            with pytest.raises(ValueError):
+                backend.write(1, bad)
+            opened.assert_not_called()
+
+
+def test_controller_validates_both_u16_offsets_before_any_read():
+    fake = type("Fake", (), {"name": "fake", "read": lambda self, off: pytest.fail("read")})()
+    ec = EmbeddedController(backend=fake, platform_info=PLATFORM)
+    with pytest.raises(ValueError):
+        ec.read_u16_be(0xD0, 256)
+
+
+@pytest.mark.parametrize("backend_type", [EcSysBackend, DevPortBackend])
+def test_hardware_io_refuses_symlinks(tmp_path, backend_type):
+    target = _fill(tmp_path / "target")
+    link = tmp_path / "io"
+    link.symlink_to(target)
+    with pytest.raises(OSError):
+        backend_type(str(link)).read(7)
+    assert target.read_bytes() == bytes(range(256))
+
+
+def test_io_fds_are_close_on_exec(tmp_path):
+    path = _fill(tmp_path / "io")
+    with transport._open_io(str(path), os.O_RDONLY) as stream:
+        assert fcntl.fcntl(stream.fileno(), fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+
+
+@pytest.mark.parametrize("backend_type", [EcSysBackend, DevPortBackend])
+def test_short_reads_are_errors(tmp_path, backend_type):
+    path = tmp_path / "empty"
+    path.touch()
+    with pytest.raises(EcError, match="short read"):
+        backend_type(str(path)).read(7)
+
+
+@pytest.mark.parametrize("backend_type", [EcSysBackend, DevPortBackend])
+def test_short_writes_are_errors(tmp_path, backend_type):
+    class ShortWrite(io.BytesIO):
+        def write(self, data):
+            return 0
+
+    kwargs = {"write_support_path": str(tmp_path / "absent")} if backend_type is EcSysBackend else {}
+    backend = backend_type("emulated-ports", **kwargs)
+    with patch.object(backend, "unwritable_reason", return_value=None):
+        with patch("gigactld.ec._open_io", return_value=ShortWrite(bytes(256))):
+            with pytest.raises(EcError, match="short write"):
+                backend.write(0x10, 0xAB)
 
 
 # --- a read-only ec_sys (#25) -----------------------------------------------
@@ -220,3 +422,24 @@ def test_ecsys_assumes_writable_when_the_parameter_is_missing(tmp_path):
     assert b.unwritable_reason() is None
     b.write(0x10, 0xAB)
     assert io.read_bytes()[0x10] == 0xAB
+
+
+def test_ecsys_refuses_unsafe_write_support_path_without_touching_io(tmp_path):
+    b, io = _backend(tmp_path, "Y\n")
+    link = tmp_path / "unsafe_write_support"
+    link.symlink_to(tmp_path / "write_support")
+    b.write_support_path = str(link)
+    with pytest.raises(EcNotWritable, match="cannot safely read"):
+        b.write(0x10, 0xAB)
+    assert io.read_bytes() == bytes(range(256))
+
+
+def test_explicit_raw_opt_in_does_not_escape_read_only_native_backend(tmp_path):
+    b, io = _backend(tmp_path, "N\n")
+    with patch("gigactld.ec.EcSysBackend", return_value=b) as backend_type:
+        backend_type.available.return_value = True
+        selected = default_backend(allow_raw=True)
+    assert selected is b
+    with pytest.raises(EcNotWritable):
+        selected.write(0x10, 0xAB)
+    assert io.read_bytes() == bytes(range(256))

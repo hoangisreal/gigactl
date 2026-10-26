@@ -32,6 +32,8 @@ def set_duty(ec, fan: int, pct: int) -> None:
     """Set a single fan (1=CPU, 2=GPU) to ``pct``% duty."""
     if fan not in FANS:
         raise ValueError(f"invalid fan {fan!r}; expected one of {FANS}")
+    if not isinstance(pct, int) or isinstance(pct, bool) or not 0 <= pct <= 100:
+        raise ValueError(f"invalid duty percent {pct!r}; expected an int in 0..100")
     command(ec, fan, (pct_to_byte(pct),), doorbell=DOORBELL)
 
 

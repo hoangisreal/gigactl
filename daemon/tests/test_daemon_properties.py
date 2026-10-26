@@ -43,6 +43,7 @@ def test_telemetry_property_reports_the_same_reading_as_the_signal(make_daemon):
     describe the same hardware."""
     d = make_daemon()
     d.ec.regs.update({0x07: 71, 0x0A: 64, 0xCE: 128, 0xCF: 64})
+    d._sample()  # getters use the bounded control-loop cache, never initiate I/O
     assert _get(d, "Telemetry").unpack() == (71, 64, 0, 0, 50, 25)
 
 
@@ -201,6 +202,7 @@ def test_a_read_only_ec_still_serves_telemetry(make_daemon):
     d = make_daemon()
     d.ec.unwritable = ec.READ_ONLY_REASON
     d.ec.regs.update({0x07: 71, 0x0A: 64})
+    d._sample()
     assert _get(d, "Telemetry").unpack()[:2] == (71, 64)
 
 

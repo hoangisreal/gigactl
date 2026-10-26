@@ -34,23 +34,26 @@ def test_a_failing_engine_says_the_profile_is_not_being_applied(make_daemon):
     assert "max" in status, f"say which profile is not happening: {status!r}"
 
 
-def test_the_chosen_profile_is_still_reported_while_it_fails(make_daemon):
-    """The profile is what the user asked for; whether it is happening is a
-    separate question, and collapsing the two would lose one of them."""
+def test_partial_apply_failure_stops_software_control_immediately(make_daemon):
+    """A failed command may already have touched hardware: enter recovery now."""
     d = _driving(make_daemon)
     d.ec.write_error = OSError("EC busy")
     d._tick()
-    assert _get(d, "ActiveProfile").get_string() == "max"
+    assert _get(d, "ActiveProfile").get_string() == "firmware"
+    assert d.control.pending_auto == {1, 2}
 
 
-def test_status_clears_once_the_fans_accept_writes_again(make_daemon):
+def test_transport_recovery_retries_handback_but_keeps_safety_latched(make_daemon):
     d = _driving(make_daemon)
     d.ec.write_error = OSError("EC busy")
     d._tick()
     assert _get(d, "EcStatus").get_string() != ""
     d.ec.write_error = None
     d._tick()
-    assert _get(d, "EcStatus").get_string() == ""
+    assert "acknowledged" in _get(d, "EcStatus").get_string()
+    assert not d.control.pending_auto
+    assert d._failsafe_tripped
+    assert d.engine.profile == "firmware"
 
 
 def test_a_sustained_fault_is_logged_once_not_every_tick(make_daemon, capsys):
@@ -110,7 +113,10 @@ def test_sustained_tick_failure_hands_fans_back_to_firmware(make_daemon):
     d._tick()
     assert d.engine.profile == "firmware"
     auto = [w for w in d.ec.writes if w == (0xF9, 0xFF)]
-    assert len(auto) == 2, f"both fans handed back, writes were {d.ec.writes}"
+    # With mailbox acknowledgement, unreadable FCMD prevents a verified
+    # handback; do not claim that two write sequences prove ownership.
+    assert not auto
+    assert d.control.pending_auto == {1, 2}
     assert "firmware" in _get(d, "EcStatus").get_string()
 
 
