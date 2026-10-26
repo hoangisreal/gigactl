@@ -27,7 +27,7 @@
 ## Nợ hardening đã biết
 
 - SELinux: gói Fedora hiện nạp rule tối thiểu cho mọi `init_t` ghi `/dev/port` (`fedora/selinux/gigactl-devport.te`). Domain riêng `gigactld_t` là hướng đúng nhưng phải re-grant D-Bus/polkit trên máy Fedora thật — chưa làm, không suy đoán.
-- Turbo vs tuned: tuned profile `boost=0` có thể ghi sau gigactl khi đổi profile điện — xem COMPATIBILITY.md. Daemon đọc live state nên không báo sai, nhưng không tự giành lại.
+- Turbo vs tuned: tuned profile `boost=0` có thể ghi sau gigactl khi đổi profile điện — xem HARDWARE.md §2. Daemon đọc live state nên không báo sai, nhưng không tự giành lại.
 
 ## Fallback & rollback
 

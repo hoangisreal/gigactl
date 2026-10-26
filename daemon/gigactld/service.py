@@ -113,7 +113,7 @@ def _curves_variant(engine: curve.ProfileEngine) -> GLib.Variant:
 class Daemon:
     # Ticks are 2s apart; 3 consecutive failures (~6s) with no successful
     # drive means the fans may be stranded at a manual duty — trip the
-    # failsafe and hand them back to firmware (PLAN.md T2.1).
+    # failsafe and hand them back to firmware (docs/PLAN.md T2.1).
     FAILSAFE_AFTER_TICKS = 3
 
     def __init__(self, ec, interval_s: int = 2,

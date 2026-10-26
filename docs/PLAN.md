@@ -1,6 +1,8 @@
 # PLAN — gigactl thành Linux Control Center cho Gigabyte G5 GE (Fedora KDE)
 
-> Đây là kế hoạch, **chưa implement**. Chỉ bắt đầu khi được phê duyệt (`go`).
+> Kế hoạch của fork (đã duyệt và đang thực thi từ 2026-10-26). Trạng thái:
+> Phase 0–2 và 4 đã xong trên máy thật; Phase 3 (power write) chưa làm;
+> Phase 5 mới xong arm CPU. Chi tiết task và trạng thái ở cuối file.
 > Đích: thay thế Gigabyte Control Center trên **một model duy nhất — G5 GE** — bằng cách mở rộng gigactl hiện có. Không rewrite, không project mới.
 
 ## Goal
@@ -35,7 +37,7 @@
 - **Phase 4 — Fedora KDE packaging & UX.** RPM spec/COPR, kiểm tra tray trên KDE Plasma, PowerDevil/`power-profiles-daemon` không xung đột daemon, tài liệu cài đặt.
 - **Phase 5 — Benchmark & phát hành.** Bộ benchmark baseline vs gigactl (sustained 30'), soak test, release notes trung thực theo nhãn Verified/Reported.
 
-Thứ tự cứng: 0 → 1 → 2; Phase 3 độc lập sau Phase 1; Phase 4 sau 2; Phase 5 cuối. Chi tiết atomic: [TASKS.md](TASKS.md). Rủi ro & rollback: [SAFETY.md](SAFETY.md).
+Thứ tự cứng: 0 → 1 → 2; Phase 3 độc lập sau Phase 1; Phase 4 sau 2; Phase 5 cuối. Chi tiết atomic ở mục "Atomic tasks" cuối file. Rủi ro & rollback: [SAFETY.md](SAFETY.md). Phần cứng/benchmark: [HARDWARE.md](HARDWARE.md).
 
 ## Validation Plan
 
@@ -51,6 +53,16 @@ Thứ tự cứng: 0 → 1 → 2; Phase 3 độc lập sau Phase 1; Phase 4 sau 
 ## Risks / Open Questions
 
 - **R1:** GE có thể khác G6 KF ở map DUT hoặc tham số `0xC1` (đã có tiền lệ báo cáo trên G5 KF). Giảm thiểu: Phase 1 không bật ghi cho tới G2.
-- **R2:** Không có máy GE trong môi trường dev hiện tại — Phase 0/1 phụ thuộc máy thật của người dùng. Đây là blocker phần cứng duy nhất.
-- **R3:** ec_sys cần `write_support=1`; trên Fedora cần modprobe config + Secure Boot không chặn module hệ thống (ec_sys là in-tree, rủi ro thấp).
-- **Mở:** exact EC/ITE part và BIOS FB của GE (Unknown — không chặn Phase 0, probe sẽ trả lời một phần). Ngoài ra: None.
+- **R2 (đã giải quyết):** máy GE thật (BIOS FB06) chính là máy dev — Phase 0/1 đã đo xong.
+- **R3 (đã giải quyết):** Fedora không có ec_sys debugfs trong kernel stock; daemon dùng `/dev/port` + SELinux module đóng gói kèm (xem HARDWARE.md §3).
+- **Mở:** exact EC/ITE part của GE (Unknown, không chặn việc gì hiện tại); arm benchmark CPU+GPU; tương tác tuned↔turbo chưa verify đầu-cuối. Ngoài ra: None.
+
+## Atomic tasks (gộp từ TASKS.md, kèm trạng thái 2026-10-26)
+
+- Phase 0 — Probe: T0.1 script read-only ✅ · T0.2 chạy trên GE thật ✅ (`docs/probe/g5-ge-fb06.txt`) · T0.3 đối chiếu ✅ (nay ở HARDWARE.md).
+- Phase 1 — GE verified: T1.1 phép đo từng quạt ✅ · T1.2 dạng 1-tham-số `0xC1` ✅ · T1.3 RGB (bằng hành vi LED, không đọc được GET_SPECS) ✅ · T1.4 nhãn Verified ✅.
+- Phase 2 — Control core: T2.1 watchdog ✅ (unit test; trip live chưa kích hoạt) · T2.2 presets ✅ (có sẵn) · T2.3 automation AC/pin ❌ chưa làm · T2.4 test ✅.
+- Phase 3 — Power write: T3.1 hiển thị ❌ · T3.2 ghi clamp ❌ · T3.3 battery limit — loại (không có sysfs) · T3.4 khóa undervolt ❌. Turbo toggle (ngoài plan gốc, user yêu cầu) ✅ thay thế một phần.
+- Phase 4 — Fedora: T4.1 RPM ✅ · T4.2 KDE tray/GUI ✅ (xác nhận trực quan) · T4.3 tài liệu cài Fedora ⚠️ một phần (UPSTREAM.md + spec; chưa COPR).
+- Phase 5 — Benchmark: T5.1 arm CPU ✅, arm GPU ❌ · T5.2 soak/abuse ⚠️ một phần (stop-daemon live ✅, soak 30' chưa) · T5.3 release notes ✅ (changelog 1.1.0 ở fork).
+- Ngoài scope (giữ nguyên): kernel module, Ghidra (điều kiện ở HARDWARE.md §5), per-key RGB, Fn hotkeys, undervolt bypass, hỗ trợ model khác ngoài nhãn hiện tại.

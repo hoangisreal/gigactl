@@ -29,6 +29,25 @@ def _support_rows() -> list[str]:
             if line.startswith("|") and "---" not in line][1:]
 
 
+def test_relative_markdown_links_resolve():
+    """Every relative link in the shipped/fork docs must point at a file
+    that exists — the 2026-10 docs consolidation moved five files, and a
+    link left pointing at a moved file is invisible until someone clicks."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    docs = [root / "README.md", root / "PRODUCT.md", root / "DESIGN.md",
+            *sorted((root / "docs").glob("*.md")),
+            root / "daemon" / "README.md", root / "gui" / "README.md"]
+    broken = []
+    for doc in docs:
+        for target in re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", doc.read_text()):
+            if "://" in target or target.startswith("mailto:"):
+                continue
+            if not (doc.parent / target).resolve().exists():
+                broken.append(f"{doc.relative_to(root)} -> {target}")
+    assert not broken, f"broken relative links: {broken}"
+
+
 def test_the_readme_verifies_exactly_the_machine_the_code_verifies():
     """PRODUCT.md #3: never claim "verified" for a machine we have not run on.
     Two users have now reported on hardware nobody here owns (#24, #25), so the

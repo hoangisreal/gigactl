@@ -127,6 +127,14 @@ The EC exposes a command mailbox on the standard ACPI EC ports. Commands are wri
 
 Both quirks cost real debugging time and are documented in full — register maps, byte orders, dead ends and all — in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
+## Documentation
+
+- [docs/PROTOCOL.md](docs/PROTOCOL.md) — the EC protocol (canonical, measured).
+- [docs/HARDWARE.md](docs/HARDWARE.md) — fork research: G5 GE hardware, compatibility matrix, benchmark record.
+- [docs/PLAN.md](docs/PLAN.md) — fork roadmap and task status; [docs/SAFETY.md](docs/SAFETY.md) — risk gates, fallback, rollback.
+- [docs/UPSTREAM.md](docs/UPSTREAM.md) — upstream contribution plan and PR drafts (fork-only, not shipped in packages).
+- [daemon/README.md](daemon/README.md) · [gui/README.md](gui/README.md) — developer notes per component.
+
 ## Credits
 
 - [nbfc-linux](https://github.com/nbfc-linux/nbfc-linux) — the `ec_probe` utility used for EC access
