@@ -121,7 +121,8 @@ class EcSysBackend:
 class DevPortBackend:
     """Raw ACPI EC access on I/O ports via ``/dev/port`` (fallback).
 
-    Not unit-tested — it needs real port I/O. The protocol is the standard
+    Unit-tested against an emulated EC port file (tests/test_ec.py); timing
+    on real port I/O remains unverified. The protocol is the standard
     ACPI 12.x handshake: poll the status port's IBF/OBF flags around each
     command/data byte.
     """

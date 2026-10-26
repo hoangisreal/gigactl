@@ -1,11 +1,96 @@
 """EC access layer — the ec_sys backend and the flock transaction are TDD'd here
-against a temp file. The /dev/port backend needs real hardware and is not unit-tested."""
+against a temp file. The /dev/port backend is driven against an emulated EC
+port file below; its real-hardware timing remains unverified."""
 import fcntl
+from unittest.mock import patch
 
 import pytest
 
-from gigactld.ec import (EcNotWritable, EcSysBackend,
+from gigactld.ec import (DevPortBackend, EcError, EcNotWritable, EcSysBackend,
                          EmbeddedController)
+
+
+class FakePortFile:
+    """Emulates /dev/port + an ACPI EC (CMD=0x66, DATA=0x62).
+
+    After RD_EC + address the EC puts the register value on DATA and sets
+    OBF; after WR_EC + address + value it stores the register.
+    """
+
+    def __init__(self, regs=None):
+        self.regs = regs if regs is not None else {0x07: 0x55, 0xCE: 0x99}
+        self.pos = 0
+        self.status = 0x00
+        self.cmd = None
+        self.stage = 0  # 0 idle, 1 awaiting address, 2 write awaiting value
+        self.addr = None
+
+    def seek(self, pos):
+        self.pos = pos
+
+    def flush(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def read(self, n=1):
+        if self.pos == DevPortBackend.CMD:
+            return bytes([self.status])
+        if self.pos == DevPortBackend.DATA:
+            value = self.regs.get(self.addr, 0) if self.cmd == 0x80 else 0
+            self.status &= ~DevPortBackend.OBF
+            self.cmd = None
+            self.stage = 0
+            return bytes([value])
+        return bytes([0])
+
+    def write(self, data):
+        value = data[0]
+        if self.pos == DevPortBackend.CMD:
+            self.cmd = value
+            self.stage = 1
+        elif self.pos == DevPortBackend.DATA:
+            if self.stage == 1:
+                self.addr = value
+                self.stage = 2
+                if self.cmd == 0x80:
+                    self.status |= DevPortBackend.OBF
+            elif self.stage == 2 and self.cmd == 0x81:
+                self.regs[self.addr] = value
+                self.stage = 0
+                self.cmd = None
+        return len(data)
+
+
+def test_devport_reads_a_register_through_the_handshake():
+    fake = FakePortFile()
+    with patch("builtins.open", return_value=fake):
+        assert DevPortBackend("/dev/port").read(0x07) == 0x55
+
+
+def test_devport_writes_a_register_through_the_handshake():
+    fake = FakePortFile()
+    with patch("builtins.open", return_value=fake):
+        DevPortBackend("/dev/port").write(0xCE, 0xAB)
+    assert fake.regs[0xCE] == 0xAB
+
+
+def test_devport_times_out_when_the_ec_never_clears_ibf():
+    class StuckFile(FakePortFile):
+        def read(self, n=1):
+            if self.pos == DevPortBackend.CMD:
+                return bytes([DevPortBackend.IBF])
+            return super().read(n)
+
+    backend = DevPortBackend("/dev/port")
+    backend._SPINS = 100
+    with patch("builtins.open", return_value=StuckFile()):
+        with pytest.raises(EcError, match="timeout"):
+            backend.read(0x07)
 
 
 def _fill(path, mutate=None):

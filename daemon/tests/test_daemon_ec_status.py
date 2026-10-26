@@ -94,6 +94,39 @@ def test_a_status_change_is_announced_so_a_running_client_notices(make_daemon):
     assert changed is not None and "EcStatus" in changed[1]
 
 
+def test_sustained_tick_failure_hands_fans_back_to_firmware(make_daemon):
+    """T2.1 watchdog: if telemetry reads keep failing, the fans may be stuck
+    at the last manual duty with nothing driving them. After the threshold
+    the daemon must hand both fans back to firmware and stop claiming the
+    profile."""
+    d = _driving(make_daemon)
+
+    def dead_read(off):
+        raise OSError("EC gone")
+    d.ec.read_u8 = dead_read
+    for _ in range(d.FAILSAFE_AFTER_TICKS - 1):
+        d._tick()
+    assert d.engine.profile == "max", "one or two bad ticks must not trip the failsafe"
+    d._tick()
+    assert d.engine.profile == "firmware"
+    auto = [w for w in d.ec.writes if w == (0xF9, 0xFF)]
+    assert len(auto) == 2, f"both fans handed back, writes were {d.ec.writes}"
+    assert "firmware" in _get(d, "EcStatus").get_string()
+
+
+def test_sustained_write_failure_trips_failsafe_without_spamming(make_daemon):
+    """The write-failure path reaches the watchdog through EcStatus, and a
+    restore attempt that also fails must not stop the profile being dropped."""
+    d = _driving(make_daemon)
+    d.ec.write_error = OSError("EC busy")
+    for _ in range(d.FAILSAFE_AFTER_TICKS):
+        d._tick()
+    assert d.engine.profile == "firmware"
+    writes_after_trip = len(d.ec.writes)
+    d._tick()
+    assert len(d.ec.writes) == writes_after_trip, "failsafe trips once, not every tick"
+
+
 def test_a_read_only_ec_outranks_a_generic_write_failure(make_daemon):
     """Both are true at once, and only one of them tells the user what to do."""
     d = _driving(make_daemon)
