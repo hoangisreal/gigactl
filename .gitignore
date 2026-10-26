@@ -6,6 +6,10 @@ __pycache__/
 build/
 dist/
 
+# Fedora packaging build products (RPMs are release artifacts, not source)
+/fedora/RPMS/
+/fedora/rpmbuild/
+
 # Debian packaging build products (the .deb lands in the parent directory)
 /debian/gigactl/
 /debian/icons/
