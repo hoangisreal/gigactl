@@ -127,6 +127,25 @@ def test_sustained_write_failure_trips_failsafe_without_spamming(make_daemon):
     assert len(d.ec.writes) == writes_after_trip, "failsafe trips once, not every tick"
 
 
+def test_failsafe_retries_the_handback_until_the_ec_accepts_it(make_daemon):
+    """Tripping while the EC refuses writes must not strand the fans at a
+    manual duty forever: once writes land again, a later tick retries the
+    firmware handback — and then stops retrying."""
+    d = _driving(make_daemon)
+    d.ec.write_error = OSError("EC busy")
+    for _ in range(d.FAILSAFE_AFTER_TICKS):
+        d._tick()
+    assert d.engine.profile == "firmware"
+    assert not [w for w in d.ec.writes if w == (0xF9, 0xFF)]
+    d.ec.write_error = None
+    d._tick()
+    auto = [w for w in d.ec.writes if w == (0xF9, 0xFF)]
+    assert len(auto) == 2, f"handback retried once the EC recovered: {d.ec.writes}"
+    writes = len(d.ec.writes)
+    d._tick()
+    assert len(d.ec.writes) == writes, "landed handback is not repeated"
+
+
 def test_a_read_only_ec_outranks_a_generic_write_failure(make_daemon):
     """Both are true at once, and only one of them tells the user what to do."""
     d = _driving(make_daemon)

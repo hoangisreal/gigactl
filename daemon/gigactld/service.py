@@ -105,7 +105,7 @@ def _curves_variant(engine: curve.ProfileEngine) -> GLib.Variant:
 class Daemon:
     # Ticks are 2s apart; 3 consecutive failures (~6s) with no successful
     # drive means the fans may be stranded at a manual duty — trip the
-    # failsafe and hand them back to firmware (PLAN.md T2.1).
+    # failsafe and hand them back to firmware.
     FAILSAFE_AFTER_TICKS = 3
 
     def __init__(self, ec, interval_s: int = 2,
@@ -129,6 +129,7 @@ class Daemon:
         self._last_ec_status = ""
         self._tick_failures = 0
         self._failsafe_tripped = False
+        self._failsafe_restored = False
 
     # --- lifecycle -----------------------------------------------------------
     def run(self) -> None:
@@ -431,8 +432,23 @@ class Daemon:
         except Exception as exc:
             print(f"gigactld: tick failed: {exc}", flush=True)
             self._note_tick_failure()
+        if self._failsafe_tripped and not self._failsafe_restored:
+            # The trip's own restore may have been refused by the same
+            # failure that tripped us; keep retrying while tripped so the
+            # fans are handed back as soon as the EC accepts writes again.
+            self._failsafe_restored = self._try_restore_fans()
         self._sync_ec_status()
         return True  # keep the timeout running
+
+    def _try_restore_fans(self) -> bool:
+        """Best-effort firmware handback of both fans; True iff both landed."""
+        landed = True
+        for f in fans.FANS:
+            try:
+                fans.restore_auto(self.ec, f)
+            except Exception:
+                landed = False
+        return landed
 
     def _note_tick_failure(self) -> None:
         """Count a failed tick; on the threshold, hand the fans to firmware.
@@ -446,11 +462,7 @@ class Daemon:
         if self._tick_failures < self.FAILSAFE_AFTER_TICKS or self._failsafe_tripped:
             return
         self._failsafe_tripped = True
-        for f in fans.FANS:
-            try:
-                fans.restore_auto(self.ec, f)
-            except Exception:
-                pass
+        self._failsafe_restored = self._try_restore_fans()
         self.engine.set_profile(curve.FIRMWARE)
         self._engine_fault = (
             "failsafe: repeated failures driving the fans — handed back "
