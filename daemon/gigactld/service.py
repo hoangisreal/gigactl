@@ -103,6 +103,11 @@ def _curves_variant(engine: curve.ProfileEngine) -> GLib.Variant:
 
 
 class Daemon:
+    # Ticks are 2s apart; 3 consecutive failures (~6s) with no successful
+    # drive means the fans may be stranded at a manual duty — trip the
+    # failsafe and hand them back to firmware (PLAN.md T2.1).
+    FAILSAFE_AFTER_TICKS = 3
+
     def __init__(self, ec, interval_s: int = 2,
                  authorizer: authz.Authorizer | None = None) -> None:
         self.ec = ec
@@ -122,6 +127,8 @@ class Daemon:
         # seconds is reported once rather than every tick.
         self._engine_fault: str | None = None
         self._last_ec_status = ""
+        self._tick_failures = 0
+        self._failsafe_tripped = False
 
     # --- lifecycle -----------------------------------------------------------
     def run(self) -> None:
@@ -376,6 +383,8 @@ class Daemon:
         # NOT persist it; the last real profile stays saved and is restored on
         # the next start/reboot.
         self.engine.set_manual()
+        self._failsafe_tripped = False
+        self._tick_failures = 0
         self._notify_fan_state()
         invocation.return_value(None)
 
@@ -415,10 +424,37 @@ class Daemon:
                 ),
             )
             self._run_engine(t.cpu_temp, t.gpu_temp, quiet=True)
+            if self._engine_fault and not self._failsafe_tripped:
+                self._note_tick_failure()
+            else:
+                self._tick_failures = 0
         except Exception as exc:
             print(f"gigactld: tick failed: {exc}", flush=True)
+            self._note_tick_failure()
         self._sync_ec_status()
         return True  # keep the timeout running
+
+    def _note_tick_failure(self) -> None:
+        """Count a failed tick; on the threshold, hand the fans to firmware.
+
+        The restore itself is best-effort per fan: the EC refusing writes is
+        one of the failures that lands us here, and that must not stop the
+        profile being dropped — claiming 'max' while nothing drives the fans
+        is the #25 failure this watchdog exists to end.
+        """
+        self._tick_failures += 1
+        if self._tick_failures < self.FAILSAFE_AFTER_TICKS or self._failsafe_tripped:
+            return
+        self._failsafe_tripped = True
+        for f in fans.FANS:
+            try:
+                fans.restore_auto(self.ec, f)
+            except Exception:
+                pass
+        self.engine.set_profile(curve.FIRMWARE)
+        self._engine_fault = (
+            "failsafe: repeated failures driving the fans — handed back "
+            "to firmware auto; pick a profile to take control again")
 
     def _run_engine(self, cpu_temp: int, gpu_temp: int, *,
                     quiet: bool = False) -> None:
@@ -441,10 +477,12 @@ class Daemon:
                 self._engine_fault = (
                     f"the fan profile '{self.engine.profile}' is not being "
                     f"applied: {exc}")
+                self.engine.retry_next_tick()
                 if not quiet:
                     raise
                 return
-        self._engine_fault = None
+        if not self._failsafe_tripped:
+            self._engine_fault = None
 
     def _apply_now(self) -> None:
         t = read_telemetry(self.ec)
@@ -466,6 +504,10 @@ class Daemon:
         except ValueError as exc:
             invocation.return_dbus_error(f"{_ERR}.InvalidArgs", str(exc))
             return
+        # The user is taking control again: re-arm the failsafe.
+        self._failsafe_tripped = False
+        self._tick_failures = 0
+        self._engine_fault = None
         if name == curve.FIRMWARE:
             for f in fans.FANS:
                 fans.restore_auto(self.ec, f)
