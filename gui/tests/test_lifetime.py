@@ -58,6 +58,34 @@ def test_does_not_offer_a_window_while_the_tray_is_working():
                                         window_visible=False) is False
 
 
+# --- should_rehide_after_fallback -------------------------------------------
+
+def test_rehides_a_fallback_window_when_a_slow_host_arrives():
+    # the login race this exists for: the tray host comes up after the grace
+    # timer gave up, so the window went up unasked — take it back down
+    assert lifetime.should_rehide_after_fallback(tray_available=True,
+                                                 window_visible=True,
+                                                 window_auto_shown=True) is True
+
+
+def test_leaves_a_user_requested_window_alone():
+    assert lifetime.should_rehide_after_fallback(tray_available=True,
+                                                 window_visible=True,
+                                                 window_auto_shown=False) is False
+
+
+def test_nothing_to_hide_when_no_window_is_up():
+    assert lifetime.should_rehide_after_fallback(tray_available=True,
+                                                 window_visible=False,
+                                                 window_auto_shown=True) is False
+
+
+def test_nothing_to_hide_while_the_tray_is_still_absent():
+    assert lifetime.should_rehide_after_fallback(tray_available=False,
+                                                 window_visible=True,
+                                                 window_auto_shown=True) is False
+
+
 # --- should_quit_on_close --------------------------------------------------
 
 def test_closing_quits_when_there_is_no_tray():
@@ -89,3 +117,17 @@ def test_screen_lock_while_trayed_is_survived_quietly():
     assert not lifetime.should_offer_window(tray_ever_registered=True,
                                             tray_available=False,
                                             window_visible=False)  # …but quietly
+
+
+def test_slow_tray_at_login_ends_hidden_but_user_window_stays():
+    """The host answers after the grace timer: hold, fallback window, re-hide —
+    yet a window the user opened themselves is never taken away."""
+    assert lifetime.should_offer_window(tray_ever_registered=False,
+                                        tray_available=False,
+                                        window_visible=False)  # grace gives up…
+    assert lifetime.should_rehide_after_fallback(tray_available=True,
+                                                 window_visible=True,
+                                                 window_auto_shown=True)
+    assert not lifetime.should_rehide_after_fallback(tray_available=True,
+                                                     window_visible=True,
+                                                     window_auto_shown=False)

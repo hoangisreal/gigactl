@@ -14,7 +14,10 @@ it. Two rules cover it:
 
 So while a tray is present, closing the window merely hides it and reopening is
 instant; with no tray host at all, ``--tray`` shows the window instead of becoming
-an invisible process, and closing it then really quits.
+an invisible process, and closing it then really quits. When the host only lost
+the startup race and registers moments after that fallback window went up, the
+window is hidden again — it was never asked for — while a window the user opened
+themselves is left alone.
 """
 from __future__ import annotations
 
@@ -100,6 +103,13 @@ class GigactlApp(Adw.Application):
         # window; "answered then went away" (a screen lock, a shell restart) is
         # waited out silently — see lifetime.should_offer_window.
         self._tray_ever_registered = False
+        # Whether the visible window exists only because the --tray grace timer
+        # gave up on a host (a slow tray at login): a late host hides it again,
+        # while a window the user asked for stays put.
+        self._fallback_shown = False
+        # Transient marker so do_activate can tell a grace-expiry activation
+        # (which leaves _fallback_shown set) from a user-driven one.
+        self._activating_from_fallback = False
 
     # --- lifecycle -----------------------------------------------------------
     def do_startup(self) -> None:
@@ -125,9 +135,14 @@ class GigactlApp(Adw.Application):
             self._sync_hold()
             return
         self._window.present()
+        self._fallback_shown = self._activating_from_fallback
         self._sync_hold()
 
     def do_shutdown(self) -> None:
+        if self._window:
+            self._window.stop()
+        if self._tray_client:
+            self._tray_client.stop()
         if self._grace_source:
             GLib.source_remove(self._grace_source)
             self._grace_source = 0
@@ -178,7 +193,11 @@ class GigactlApp(Adw.Application):
             print("gigactl-gui: no tray host on this session, showing the window "
                   "instead", flush=True)
             self._start_hidden = False
-            self.activate()
+            self._activating_from_fallback = True
+            try:
+                self.activate()
+            finally:
+                self._activating_from_fallback = False
         self._sync_hold()
         return GLib.SOURCE_REMOVE
 
@@ -199,6 +218,18 @@ class GigactlApp(Adw.Application):
             if self._grace_source:
                 GLib.source_remove(self._grace_source)
                 self._grace_source = 0
+            if (self._window is not None
+                    and lifetime.should_rehide_after_fallback(
+                        tray_available=True,
+                        window_visible=self._window_visible(),
+                        window_auto_shown=self._fallback_shown)):
+                # A slow host lost the startup race: this window went up only
+                # because the grace timer gave up, so take it back down now
+                # the tray is here. A user-opened window never reaches this.
+                print("gigactl-gui: tray host arrived late, hiding the window "
+                      "again", flush=True)
+                self._fallback_shown = False
+                self._window.set_visible(False)
         self._apply_close_policy()
         # Every path ends here: skipping it once left the tray's hold in place
         # after the icon went away, and the app outlived its last window.
@@ -215,6 +246,7 @@ class GigactlApp(Adw.Application):
     def _on_window_removed(self, _app, window) -> None:
         if window is not self._window:
             return
+        window.stop()
         self._window = None
         if lifetime.should_quit_on_close(tray_available=self._tray_showing()):
             # No icon to come back from, so the close was a real goodbye rather
@@ -242,6 +274,8 @@ class GigactlApp(Adw.Application):
             self.activate()
             return
         if action == tray_menu.ACTION_QUIT:
+            if self._window:
+                self._window.cancel_curve_edits()
             self.quit()
             return
         if client is None:
@@ -252,7 +286,12 @@ class GigactlApp(Adw.Application):
             return
         profile = tray_menu.profile_of(action)
         if profile:
-            client.set_profile(profile)
+            if self._window:
+                # Use the window's serialized fan channel, even while hidden:
+                # two clients would race a pending curve against firmware auto.
+                self._window.set_fan_profile(profile)
+            else:
+                client.set_profile(profile)
 
     def _notify_error(self, message: str) -> None:
         """A tray action can fail with no window on screen, so say it where the

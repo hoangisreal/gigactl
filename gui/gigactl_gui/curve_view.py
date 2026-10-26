@@ -52,6 +52,7 @@ class CurveView(Adw.Bin):
         self._ghost: curves.Curve | None = None
         self._now_temp: int | None = None
         self._now_cpu_temp: int | None = None
+        self._now_gpu_temp: int | None = None
         self._dragging: int | None = None
         self._drag_origin: tuple[float, float] | None = None
         self._selected = 0
@@ -107,11 +108,17 @@ class CurveView(Adw.Bin):
         self._ghost = list(points) if points else None
         self._area.queue_draw()
 
-    def set_now(self, temp: int | None, cpu_temp: int | None = None) -> None:
-        """Live telemetry for the marker. ``cpu_temp`` lets the predicted duty
-        account for the daemon's floor engaging on the hotter of the two."""
+    def cancel_editing(self) -> None:
+        """Invalidate an ongoing drag when firmware/preset/navigation wins."""
+        self._dragging = None
+        self._drag_origin = None
+
+    def set_now(self, temp: int | None, cpu_temp: int | None = None,
+                gpu_temp: int | None = None) -> None:
+        """Both sensors let the marker include software safety overrides."""
         self._now_temp = temp
         self._now_cpu_temp = cpu_temp
+        self._now_gpu_temp = gpu_temp
         self._area.queue_draw()
 
     # --- editing -------------------------------------------------------------
@@ -275,7 +282,8 @@ class CurveView(Adw.Bin):
             return
         clamped = max(curves.TEMP_MIN, min(curves.TEMP_MAX, self._now_temp))
         nx, _ = curves.to_pixel(clamped, 0, width, plot_h)
-        duty = curves.predicted(self._points, self._now_temp, self._now_cpu_temp)
+        duty = curves.predicted(self._points, self._now_temp,
+                                 self._now_cpu_temp, self._now_gpu_temp)
         _, ny = curves.to_pixel(curves.TEMP_MIN, duty, width, plot_h)
 
         r, g, b = temperature.color_rgb(self._now_temp, dark=dark)

@@ -26,15 +26,35 @@ def test_predicted_applies_the_safety_floor():
     # the daemon never idles a fan while the component is hot, so the editor
     # must not promise 0 % either
     assert curves.predicted(lazy, 90) == curves.FLOOR_PCT
-    assert curves.predicted(lazy, 84) == 0  # below the floor temp, 0 stands
+    assert curves.predicted(lazy, 69) == 0
+    assert curves.predicted(lazy, 70) == curves.FLOOR_PCT
 
 
 def test_predicted_floors_on_the_hotter_of_fan_and_cpu():
     lazy = [(40, 0), (55, 0), (70, 0), (85, 0), (95, 0)]
     # the GPU is cool but the CPU is hot: the daemon floors the fan anyway
-    assert curves.predicted(lazy, 50, cpu_temp=95) == curves.FLOOR_PCT
+    assert curves.predicted(lazy, 50, cpu_temp=85) == curves.FLOOR_PCT
+    assert curves.predicted(lazy, 50, cpu_temp=95) == 100
     # both cool: no floor
     assert curves.predicted(lazy, 50, cpu_temp=60) == 0
+
+
+@pytest.mark.parametrize("source,cpu,gpu,expected", [
+    (69, 69, None, 0), (70, 50, None, 30), (84, 50, None, 30),
+    (50, 69, None, 0), (50, 70, None, 30), (50, 84, None, 30), (50, 85, None, 30),
+    (94, 50, None, 30), (95, 50, None, 100), (50, 95, None, 100),
+    (50, 60, 86, 0), (50, 60, 87, 100),
+])
+def test_software_safety_thresholds_and_sensor_cross_checks(source, cpu, gpu, expected):
+    lazy = [(40, 0), (55, 0), (70, 0), (85, 0), (95, 0)]
+    assert curves.predicted(lazy, source, cpu, gpu) == expected
+    assert curves.seeded_from(lazy) == lazy, "software overrides must not rewrite stored curves"
+
+
+def test_safety_note_names_software_thresholds_not_firmware_limits():
+    assert "Software safety (not firmware critical limits)" in curves.SAFETY_NOTE
+    for threshold in ("30%", "70°C", "85°C", "95°C", "87°C"):
+        assert threshold in curves.SAFETY_NOTE
 
 
 def test_annotation_names_the_temperature_and_the_result():

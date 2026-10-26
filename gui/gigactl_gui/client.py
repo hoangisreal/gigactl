@@ -81,6 +81,15 @@ class CurveSnapshot:
                    [(int(t), int(d)) for t, d in gpu])
 
 
+@dataclass
+class _FanRequest:
+    method: str
+    params: GLib.Variant | None
+    owner: str
+    key: str | None = None  # cpu / gpu / both for curves
+    superseded: bool = False
+
+
 class DaemonClient:
     """Live view of the daemon. Callbacks fire on the GLib main loop:
 
@@ -101,6 +110,11 @@ class DaemonClient:
         self._on_state = on_state
         self._on_error = on_error
         self._proxy: Gio.DBusProxy | None = None
+        self._owner: str | None = None
+        self._stopped = False
+        self._fan_pending: list[_FanRequest] = []
+        self._fan_inflight: _FanRequest | None = None
+        self._fan_cancellable: Gio.Cancellable | None = None
 
     def start(self) -> None:
         """Create the proxy asynchronously so a slow/absent daemon never blocks
@@ -114,13 +128,24 @@ class DaemonClient:
             self._on_proxy_ready,
         )
 
+    def stop(self) -> None:
+        """No queued writes or callbacks may outlive a destroyed window/app."""
+        self._stopped = True
+        self._discard_fan_requests()
+        self._on_telemetry = self._on_availability = None
+        self._on_state = self._on_error = None
+        self._proxy = None
+
     def _on_proxy_ready(self, _source, result) -> None:
         try:
-            self._proxy = Gio.DBusProxy.new_for_bus_finish(result)
+            proxy = Gio.DBusProxy.new_for_bus_finish(result)
         except GLib.Error as exc:  # pragma: no cover - environment dependent
             print(f"gigactl-gui: could not reach the daemon: {exc}", flush=True)
             self._notify_availability()
             return
+        if self._stopped:
+            return
+        self._proxy = proxy
         self._proxy.connect("g-signal", self._on_signal)
         self._proxy.connect("notify::g-name-owner", lambda *_: self._notify_availability())
         self._proxy.connect("g-properties-changed", self._on_properties_changed)
@@ -129,7 +154,7 @@ class DaemonClient:
 
     @property
     def available(self) -> bool:
-        return bool(self._proxy and self._proxy.get_name_owner())
+        return bool(not self._stopped and self._proxy and self._proxy.get_name_owner())
 
     def _safe(self, what: str, callback, *args) -> None:
         """Every callback below is reached from the GLib dispatcher, where an
@@ -142,6 +167,16 @@ class DaemonClient:
             print(f"gigactl-gui: {what} handler failed: {exc}", flush=True)
 
     def _notify_availability(self) -> None:
+        owner = self._proxy.get_name_owner() if self._proxy else None
+        if owner != self._owner:
+            # Never replay a former owner's queued curve on its replacement.
+            previous = self._owner
+            self._discard_fan_requests()
+            self._owner = owner
+            if previous and owner:
+                # D-Bus can replace an owner without an intermediate owner=None
+                # notification. Pages must invalidate their debounce timers too.
+                self._safe("availability", self._on_availability, False)
         self._safe("availability", self._on_availability, self.available)
 
     def _notify_state(self) -> None:
@@ -209,14 +244,95 @@ class DaemonClient:
         self._call("SetTurboBoost", GLib.Variant("(b)", (enabled,)))
 
     def set_profile(self, name: str) -> None:
-        self._call("SetProfile", GLib.Variant("(s)", (name,)))
+        self._queue_fan_call("SetProfile", GLib.Variant("(s)", (name,)))
 
     def restore_firmware(self) -> None:
-        self._call("RestoreFirmware", None)
+        self._queue_fan_call("RestoreFirmware", None)
 
     def set_curve(self, which: str, points: list[tuple[int, int]],
                   linked: bool) -> None:
-        self._call("SetCurve", GLib.Variant("(sa(uu)b)", (which, points, linked)))
+        self._queue_fan_call("SetCurve", GLib.Variant("(sa(uu)b)", (which, points, linked)),
+                             "both" if linked else which)
+
+    def cancel_curve_requests(self, which: str | None = None) -> None:
+        """Discard unsent curves and invalidate superseded completions.
+
+        Ordinary curve updates stay single-flight. A preset/firmware escape
+        additionally pre-empts the local waiter below, without waiting on a
+        possibly slow authorization. Cancellation cannot retract a sent D-Bus
+        message: the daemon's fan-generation guard rejects stale authorization
+        completions after it receives the newer intent.
+        """
+        def matches(request: _FanRequest) -> bool:
+            return request.method == "SetCurve" and (
+                which is None or request.key in (which, "both"))
+
+        self._fan_pending = [r for r in self._fan_pending if not matches(r)]
+        if self._fan_inflight and matches(self._fan_inflight):
+            self._fan_inflight.superseded = True
+
+    def _queue_fan_call(self, method: str, params: GLib.Variant | None,
+                        key: str | None = None) -> None:
+        if method == "SetCurve":
+            self.cancel_curve_requests(None if key == "both" else key)
+        else:
+            # The latest explicit preset/escape supersedes every unsent fan
+            # request, not just the debounce timer in one particular page. Send
+            # the escape immediately, rather than waiting for an old auth reply.
+            self._discard_fan_requests()
+        if not self.available:
+            self._report(errors.NO_DAEMON)
+            return
+        self._fan_pending.append(_FanRequest(method, params,
+                                             self._proxy.get_name_owner(), key))
+        self._pump_fan_requests()
+
+    def _pump_fan_requests(self) -> None:
+        if self._fan_inflight or not self._fan_pending:
+            return
+        if not self.available:
+            self._discard_fan_requests()
+            return
+        request = self._fan_pending.pop(0)
+        if request.owner != self._proxy.get_name_owner():
+            self._discard_fan_requests()
+            return
+        self._fan_inflight = request
+        self._fan_cancellable = Gio.Cancellable.new()
+        try:
+            self._proxy.call(request.method, request.params, Gio.DBusCallFlags.NO_AUTO_START,
+                             -1, self._fan_cancellable, self._on_fan_call_done, request)
+        except Exception as exc:
+            self._fan_inflight = self._fan_cancellable = None
+            self._report(errors.human_message(str(exc)))
+            self._pump_fan_requests()
+
+    def _on_fan_call_done(self, proxy, result, request: _FanRequest) -> None:
+        current = self._fan_inflight is request
+        message = None
+        try:
+            proxy.call_finish(result)
+        except GLib.Error as exc:
+            message = errors.human_message(exc.message)
+        except Exception as exc:
+            print(f"gigactl-gui: {request.method} failed oddly: {exc}", flush=True)
+            message = errors.human_message("")
+        if not current:
+            return  # cancelled old-owner/closed-client completion
+        self._fan_inflight = self._fan_cancellable = None
+        if (message and not request.superseded and self.available
+                and request.owner == self._proxy.get_name_owner()):
+            self._report(message)
+        self._pump_fan_requests()
+
+    def _discard_fan_requests(self) -> None:
+        self._fan_pending.clear()
+        if self._fan_inflight:
+            self._fan_inflight.superseded = True
+        self._fan_inflight = None
+        cancellable, self._fan_cancellable = self._fan_cancellable, None
+        if cancellable:
+            cancellable.cancel()
 
     def set_keyboard_color(self, r: int, g: int, b: int) -> None:
         self._call("SetKeyboardColor", GLib.Variant("(uuu)", (r, g, b)))
@@ -233,7 +349,7 @@ class DaemonClient:
         if not self.available:
             self._report(errors.NO_DAEMON)
             return
-        self._proxy.call(method, params, Gio.DBusCallFlags.NONE, -1, None,
+        self._proxy.call(method, params, Gio.DBusCallFlags.NO_AUTO_START, -1, None,
                          self._on_call_done, method)
 
     def _on_call_done(self, proxy, result, method) -> None:
@@ -246,6 +362,8 @@ class DaemonClient:
             self._report(errors.human_message(""))
 
     def _report(self, message: str) -> None:
+        if self._stopped:
+            return
         if self._on_error:
             self._on_error(message)
         else:  # pragma: no cover - always wired by the window

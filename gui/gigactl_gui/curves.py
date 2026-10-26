@@ -21,7 +21,15 @@ from __future__ import annotations
 
 POINTS = 5
 FLOOR_PCT = 30
-FLOOR_TEMP_C = 85
+FLOOR_TEMP_C = 70
+EMERGENCY_TEMP_C = 95
+GPU_EMERGENCY_TEMP_C = 87
+
+SAFETY_NOTE = (
+    "Software safety (not firmware critical limits): at least 30% at source or CPU ≥70°C "
+    "(including the legacy 85°C floor); both fans 100% at CPU ≥95°C or GPU ≥87°C. "
+    "Changes apply live; Firmware auto cancels pending edits."
+)
 
 # The graph's drawn range. It starts at 30 °C to match the temperature scale's
 # own floor (``temperature.GAUGE_MIN_C``) — below that the fans have nothing to
@@ -64,24 +72,29 @@ def duty_for(points: Curve, temp: float) -> int:
     return points[-1][1]
 
 
-def predicted(points: Curve, temp: float, cpu_temp: float | None = None) -> int:
-    """What the fans will actually run at — the curve *plus* the daemon's floor.
+def predicted(points: Curve, temp: float, cpu_temp: float | None = None,
+              gpu_temp: float | None = None) -> int:
+    """Curve target plus conservative SOFTWARE floors, not firmware limits.
 
-    The daemon engages the floor on ``max(source_temp, cpu_temp)``, so a GPU
-    curve is floored by a hot CPU too; pass ``cpu_temp`` to model that, or leave
-    it out when the curve's own fan *is* the CPU.
+    The 70°C source/CPU floor includes the legacy 85°C floor; 95°C on either
+    source/CPU is an emergency. With both sensors available, also mirror the
+    daemon main loop's GPU>=87°C emergency override for BOTH fans. This is an
+    instantaneous target, not a prediction of hysteresis or physical fan ramp.
     """
     duty = duty_for(points, temp)
     hottest = temp if cpu_temp is None else max(temp, cpu_temp)
+    if hottest >= EMERGENCY_TEMP_C or (
+            gpu_temp is not None and gpu_temp >= GPU_EMERGENCY_TEMP_C):
+        return 100
     if hottest >= FLOOR_TEMP_C:
         return max(duty, FLOOR_PCT)
     return duty
 
 
 def annotation(label: str, temp: int, points: Curve,
-               cpu_temp: float | None = None) -> str:
+               cpu_temp: float | None = None, gpu_temp: float | None = None) -> str:
     """The live read-out, e.g. ``"CPU now 66° → fans 45%"``."""
-    return f"{label} now {temp}° → fans {predicted(points, temp, cpu_temp)}%"
+    return f"{label} now {temp}° → fans {predicted(points, temp, cpu_temp, gpu_temp)}%"
 
 
 def is_valid(points: Curve) -> bool:

@@ -11,7 +11,10 @@ desktop with no tray host at all should get a window, because otherwise the user
 launched something and got nothing. But a host that answered once and then
 disappeared is usually temporary — GNOME disables extensions at the lock screen,
 and a shell restart drops the watcher for a moment — so the app waits quietly to
-re-register rather than shoving a window over whatever is on screen.
+re-register rather than shoving a window over whatever is on screen. A host that
+answers *late* — after the grace timer already offered a window — gets that
+window back: it went up unasked, so hiding it again restores what ``--tray``
+promised, while a window the user opened themselves is never taken away.
 """
 from __future__ import annotations
 
@@ -37,6 +40,19 @@ def should_offer_window(*, tray_ever_registered: bool, tray_available: bool,
     over it.
     """
     return not tray_ever_registered and not tray_available and not window_visible
+
+
+def should_rehide_after_fallback(*, tray_available: bool, window_visible: bool,
+                                window_auto_shown: bool) -> bool:
+    """Whether a late-arriving tray host should hide the window again.
+
+    Only when the window is up solely because the grace timer gave up waiting
+    for a host — the slow-tray-at-login race, where the icon registers moments
+    after the fallback window appears. A window the user asked for
+    (``window_auto_shown`` False) stays put: taking it away would yank a window
+    out from under them.
+    """
+    return tray_available and window_visible and window_auto_shown
 
 
 def should_quit_on_close(*, tray_available: bool) -> bool:

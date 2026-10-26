@@ -109,6 +109,7 @@ class OverviewWindow(Adw.ApplicationWindow):
         self._nav = Adw.NavigationView()
         self._nav.add(overview)
         self._nav.add(self._curve_page)
+        self._wire_curve_lifetime()
 
         # Toasts live above the whole stack so a refused write is visible on
         # whichever screen the user is looking at.
@@ -125,8 +126,31 @@ class OverviewWindow(Adw.ApplicationWindow):
             if source:
                 GLib.source_remove(source)
         self._brightness_source = self._resync_source = 0
-        self._curve_page.cancel_pending()
+        self._pending_brightness = None
+        self._curve_page.set_active(False)
         return False  # let the close proceed
+
+    def _wire_curve_lifetime(self) -> None:
+        # Back gestures/header buttons and hide-on-close use the same path as
+        # explicit navigation. A late drag/timer cannot send from a hidden page.
+        self._nav.connect("notify::visible-page", self._on_curve_visibility_changed)
+        self.connect("notify::visible", self._on_curve_visibility_changed)
+
+    def _on_curve_visibility_changed(self, *_args) -> None:
+        self._curve_page.set_active(
+            self.get_visible() and self._nav.get_visible_page() is self._curve_page)
+
+    def cancel_curve_edits(self) -> None:
+        self._curve_page.cancel_pending()
+
+    def set_fan_profile(self, profile_id: str) -> None:
+        """Shared by overview and tray: cancel edits before the new intent."""
+        self.cancel_curve_edits()
+        self._client.set_profile(profile_id)
+
+    def stop(self) -> None:
+        self._on_close(self)
+        self._client.stop()
 
     # --- construction --------------------------------------------------------
     def _build_banner(self, model: Model) -> Gtk.Box:
@@ -382,7 +406,7 @@ class OverviewWindow(Adw.ApplicationWindow):
     def _on_profile_toggled(self, button: Gtk.ToggleButton, profile_id: str) -> None:
         if self._syncing or not button.get_active():
             return
-        self._client.set_profile(profile_id)
+        self.set_fan_profile(profile_id)
 
     def _on_custom_clicked(self, _button) -> None:
         self._curve_page.sync_from_daemon()
@@ -453,6 +477,8 @@ class OverviewWindow(Adw.ApplicationWindow):
             self._update_banner()
             profile = self._client.active_profile() or self._last_profile
             if profile:
+                if profile != self._last_profile and profile != profiles.CUSTOM:
+                    self.cancel_curve_edits()
                 self._last_profile = profile
                 shown = GLib.markup_escape_text(profiles.display_name(profile))
                 self._now_label.set_markup(f"Now: <b>{shown}</b>")
@@ -540,6 +566,7 @@ class OverviewWindow(Adw.ApplicationWindow):
 
     def _on_availability(self, available: bool) -> None:
         if not available:
+            self.cancel_curve_edits()
             self._show_waiting()
         self._update_sensitivity()
 

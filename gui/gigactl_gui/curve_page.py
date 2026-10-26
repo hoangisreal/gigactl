@@ -44,7 +44,10 @@ class CurvePage(Adw.NavigationPage):
         # off firmware — a view-mode switch must not be an edit.
         self._dirty = False
         self._daemon_has_curve = False
+        self._active = False
+        self._usable = False
         self._send_source = 0
+        self._send_generation = 0
         self._pending: tuple[str, curves.Curve, bool] | None = None
         self._controls: list[Gtk.Widget] = []
 
@@ -143,8 +146,7 @@ class CurvePage(Adw.NavigationPage):
         self._annotation.add_css_class("status-pill")
 
         note = Gtk.Label(
-            label=f"Never below {curves.FLOOR_PCT}% above "
-                  f"{curves.FLOOR_TEMP_C}° · changes apply straight away",
+            label=curves.SAFETY_NOTE,
             xalign=0.0, hexpand=True, wrap=True)
         note.add_css_class("metric-sub")
 
@@ -168,6 +170,8 @@ class CurvePage(Adw.NavigationPage):
         self._fan_switcher.set_visible(not linked)
         if self._syncing:
             return
+        if not self._active or not self._usable:
+            return
         self._linked = linked
         if linked:
             # linking adopts the curve on screen for both fans, which is what
@@ -185,6 +189,8 @@ class CurvePage(Adw.NavigationPage):
         self._refresh_view()
 
     def _on_curve_edited(self, points: curves.Curve) -> None:
+        if self._syncing or not self._active or not self._usable:
+            return
         self._dirty = True
         self._curves[self._editing] = points
         if self._linked:
@@ -193,32 +199,48 @@ class CurvePage(Adw.NavigationPage):
         self._queue_send(self._editing, points)
 
     def _on_firmware_clicked(self, _button) -> None:
-        self._client.set_profile("firmware")
+        self.cancel_pending()
+        self._client.restore_firmware()
 
     # --- sending -------------------------------------------------------------
     def _queue_send(self, which: str, points: curves.Curve) -> None:
         """Debounced, but the *value* is captured now: a daemon echo landing
         before the timer fires must not change what we send."""
+        if not self._active or not self._usable or not self._client.available:
+            return
+        self._client.cancel_curve_requests(None if self._linked else which)
         self._pending = (which, list(points), self._linked)
         if self._send_source:
             GLib.source_remove(self._send_source)
-        self._send_source = GLib.timeout_add(_DEBOUNCE_MS, self._send_now)
+        self._send_generation += 1
+        self._send_source = GLib.timeout_add(_DEBOUNCE_MS, self._send_now,
+                                            self._send_generation)
 
-    def _send_now(self) -> bool:
+    def _send_now(self, generation: int) -> bool:
+        if generation != self._send_generation:
+            return GLib.SOURCE_REMOVE
         self._send_source = 0
         pending, self._pending = self._pending, None
-        if pending:
+        if pending and self._active and self._usable and self._client.available:
             which, points, linked = pending
             self._client.set_curve(which, points, linked)
         return GLib.SOURCE_REMOVE
 
     def cancel_pending(self) -> None:
-        """Called when the window closes: the timer would otherwise fire into a
-        torn-down page."""
+        """Cancel timers AND unsent client requests before leaving/edit override."""
         if self._send_source:
             GLib.source_remove(self._send_source)
         self._send_source = 0
+        self._send_generation += 1
         self._pending = None
+        self._dirty = self._daemon_has_curve = False
+        self._view.cancel_editing()
+        self._client.cancel_curve_requests()
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        if not active:
+            self.cancel_pending()
 
     # --- daemon state --------------------------------------------------------
     def sync_from_daemon(self) -> None:
@@ -232,7 +254,8 @@ class CurvePage(Adw.NavigationPage):
         self._syncing = True
         try:
             self._linked = snapshot.linked
-            self._daemon_has_curve = bool(snapshot.cpu)
+            self._daemon_has_curve = (bool(snapshot.cpu)
+                                      and self._client.active_profile() == "custom")
             if snapshot.cpu:
                 self._curves[CPU] = curves.seeded_from(snapshot.cpu)
                 self._curves[GPU] = curves.seeded_from(
@@ -252,6 +275,9 @@ class CurvePage(Adw.NavigationPage):
         self._update_annotation()
 
     def set_controls_sensitive(self, usable: bool) -> None:
+        self._usable = usable
+        if not usable:
+            self.cancel_pending()
         for widget in self._controls:
             widget.set_sensitive(usable)
         self._view.set_sensitive(usable)
@@ -267,9 +293,8 @@ class CurvePage(Adw.NavigationPage):
         return GPU if self._editing == CPU else CPU
 
     def _push_now(self) -> None:
-        """The daemon floors a fan on the hotter of its own and the CPU's
-        temperature, so the marker needs both to predict honestly."""
-        self._view.set_now(self._temps[self._editing], self._temps[CPU])
+        """Both sensors are needed for the software floors/emergency override."""
+        self._view.set_now(self._temps[self._editing], self._temps[CPU], self._temps[GPU])
 
     def _update_annotation(self) -> None:
         temp = self._temps[self._editing]
@@ -280,6 +305,6 @@ class CurvePage(Adw.NavigationPage):
             self._annotation.set_text(f"Waiting for the {label} temperature…")
             return
         self._annotation.set_text(curves.annotation(
-            label, temp, self._curves[self._editing], self._temps[CPU]))
+            label, temp, self._curves[self._editing], self._temps[CPU], self._temps[GPU]))
         # tinted by the same one temperature scale as the Overview's pill
         self._annotation.add_css_class(temperature.band(temp).value)
