@@ -44,7 +44,7 @@ model_check() {
     die "vendor '$VENDOR' unsupported — verified on Gigabyte G6 KF only. GKBD_UNSAFE=1 to override." ;;
   esac
   case "$MODEL" in
-    "G6 KF") ;;
+    "G6 KF"|"G5 GE") ;;  # verified live (G5 GE fans: gate G2, 2026-10-26)
     G5*|G6*|G7*) echo "gkbd: note: '$MODEL' untested (verified on G6 KF)." >&2 ;;
     *) die "model '$MODEL' unsupported — verified on Gigabyte G6 KF only. GKBD_UNSAFE=1 to override." ;;
   esac

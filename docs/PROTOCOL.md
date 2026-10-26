@@ -97,6 +97,39 @@ Zones 1/2 (`FDAT=0x04/0x05`) and the "all zones" variant (`0x07`) exist for 3-zo
 | `0x52` | BIOS features 1 (bit `0x00400000` = 3-zone RGB class, `0x40000000` = white-only) |
 | `0x3D` | white/single brightness readback |
 
+## Measured on the Gigabyte G5 GE (BIOS FB06, Fedora 44, 2026-10-26)
+
+Read-only probe (`tools/ec_read.py` via `/dev/port` — Fedora kernels ship no
+ec_sys debugfs): CPU 43 °C matching coretemp, DUT1 raw 71 (~28 %), fan 1
+≈2,372 RPM, fan 2 stopped at idle — all consistent across samples.
+
+First controlled write (`tools/g2_measure.py --fan 1`, 80 % for 5 s):
+DUT1 rose 27 % → 80 % while DUT2 stayed 0 %, RPM1 rose 2,372 → ~4,991, and
+the fan returned to firmware duty (~30 %) on handback. The fan-2 run was
+the mirror image: DUT2 0 % → 80 %, RPM2 0 → ~4,637, DUT1/RPM1 untouched,
+handback to 0 %. So on the G5 GE the `0xC1` one-parameter form works for
+both fans and the duty registers are **not** swapped: commanding fan N
+moves `0xCE`/`0xCF` and tach N as documented above. (Physical left/right
+placement of fan 1 vs fan 2 in this chassis was not separately recorded;
+the functional CPU/GPU assignment matches the register semantics.)
+
+Installed-system failsafe (same day): with both fans at 100 % via the
+daemon, `systemctl stop gigactl` returned control to firmware — a
+read-only probe seconds later showed fan 1 back at its firmware idle
+(27 %, ~2,372 RPM) and fan 2 stopped, not frozen at the manual duty.
+
+Daemon end-to-end (`tools/daemon_smoke.py`, same session): the real
+`Daemon` tick loop with the `performance` profile drove both fans from
+firmware idle (27 %/0 %) to the curve duty (43 %/41 %, ~3,360/3,100 RPM)
+over `/dev/port` with no engine fault across 4 ticks, then handed both
+fans back to firmware.
+
+Keyboard (`tools/g2_keyboard.py`, same session): master-enable via
+`0xC4`, then colour set via `0xCA` — the keys visibly switched to orange
+at full brightness and back to the factory blue on command. The
+single-zone RGB path, including the B,R,G byte order, works on the G5 GE
+exactly as documented for the G6 KF.
+
 ## Open questions (reported elsewhere, not reproduced here)
 
 Everything above this section was verified on the G6 KF. What follows are

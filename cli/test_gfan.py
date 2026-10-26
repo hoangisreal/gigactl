@@ -219,6 +219,17 @@ def test_a_direct_write_proceeds_once_the_lock_is_free(sandbox):
     assert sandbox.ec_writes
 
 
+def test_g5_ge_is_a_verified_model_in_both_tools():
+    """G5 GE passed gate G2 on real hardware 2026-10-26 (both fans driven
+    to 80% and handed back — docs/PROTOCOL.md): both CLIs must list it with
+    the verified G6 KF, before the generic G5* allowance."""
+    for tool in ("gfan", "gkbd"):
+        body = source_text(tool)
+        assert '"G6 KF"|"G5 GE")' in body, f"{tool} does not verify the G5 GE"
+        assert body.index('"G6 KF"|"G5 GE")') < body.index("G5*|G6*|G7*"), \
+            f"{tool} lets the generic G5* case reach the G5 GE first"
+
+
 def test_the_lock_is_the_one_the_daemon_takes():
     """A different path would serialise nothing. The lock lives once, in the
     shared lib, and both scripts source that lib rather than carrying copies."""
