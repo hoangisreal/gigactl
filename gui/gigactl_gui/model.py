@@ -1,7 +1,7 @@
 """Which Gigabyte model is this, and how far do we trust it?
 
 Mirrors the guard the ``gfan``/``gkbd`` CLIs already apply (see those scripts):
-the vendor must be GIGABYTE; the **G6 KF** is the one verified machine; other
+the vendor must be GIGABYTE; **G6 KF** and **G5 GE** are verified machines; other
 G5/G6/G7 models are *expected* to work (same Clevo platform, untested); anything
 else is unsupported. DMI lives in world-readable sysfs, so the unprivileged GUI
 classifies the machine itself — no daemon round-trip needed.
@@ -18,6 +18,7 @@ VENDOR_PATH = "/sys/class/dmi/id/sys_vendor"
 MODEL_PATH = "/sys/class/dmi/id/product_name"
 
 VERIFIED_MODEL = "G6 KF"
+VERIFIED_MODELS = ("G6 KF", "G5 GE")  # G5 GE: gate G2 measured 2026-10-26
 _FAMILY_PREFIXES = ("G5", "G6", "G7")
 
 
@@ -34,7 +35,7 @@ def classify(vendor: str, name: str) -> Support:
     if not vendor.strip().upper().startswith("GIGABYTE"):
         return Support.UNSUPPORTED
     n = name.strip().upper()
-    if n == VERIFIED_MODEL:
+    if n in VERIFIED_MODELS:
         return Support.VERIFIED
     if n.startswith(_FAMILY_PREFIXES):
         return Support.EXPECTED

@@ -7,6 +7,12 @@ def test_verified_is_g6kf():
     assert model.classify("GIGABYTE", "G6 KF") is Support.VERIFIED
 
 
+def test_g5_ge_is_verified_after_gate_g2():
+    # Measured on real hardware 2026-10-26: both fans driven to 80% and
+    # handed back (docs/PROTOCOL.md, "Measured on the Gigabyte G5 GE").
+    assert model.classify("GIGABYTE", "G5 GE") is Support.VERIFIED
+
+
 def test_family_members_are_expected():
     for name in ("G5 MF", "G6 KE", "G7 GD"):
         assert model.classify("GIGABYTE", name) is Support.EXPECTED

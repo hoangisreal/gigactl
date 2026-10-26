@@ -42,7 +42,7 @@ model_check() { # gate WRITE commands on supported hardware (reads are harmless)
     *) die "vendor '$VENDOR' unsupported — verified on Gigabyte G6 KF only. GFAN_UNSAFE=1 gfan ... to override (risky)." ;;
   esac
   case "$MODEL" in
-    "G6 KF") ;;  # verified live on this machine
+    "G6 KF"|"G5 GE") ;;  # verified live (G5 GE: gate G2, 2026-10-26)
     G5*|G6*|G7*)
       echo "gfan: note: '$MODEL' untested (verified on G6 KF; same Clevo platform expected)." >&2 ;;
     *) die "model '$MODEL' unsupported — verified on Gigabyte G6 KF only. GFAN_UNSAFE=1 gfan ... to override (risky)." ;;
