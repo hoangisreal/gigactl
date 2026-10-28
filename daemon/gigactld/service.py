@@ -20,6 +20,19 @@ from .telemetry import read_telemetry  # noqa: E402
 
 _ERR = "io.github.smairio.gigactl.Error"
 
+# What EcStatus says while a tripped failsafe's trouble lasts. The app shows
+# these after "Nothing is reaching the hardware: ", hence the lower-case start.
+# The two must stay distinct: the handback is an EC write too, and the failure
+# that trips the failsafe usually refuses it as well. Once the EC answers again
+# and the fans are on firmware, EcStatus is empty — nothing is wrong any more,
+# and the profile reading 'firmware' is what tells the story.
+_FAILSAFE_LANDED = (
+    "the fans could not be controlled for several seconds, so they were "
+    "handed back to firmware auto. The daemon keeps trying to reach them.")
+_FAILSAFE_PENDING = (
+    "the fans could not be controlled for several seconds, and handing them "
+    "back to firmware auto failed too. The daemon keeps trying.")
+
 BUS_NAME = "io.github.smairio.gigactl"
 OBJECT_PATH = "/io/github/smairio/gigactl"
 INTERFACE = "io.github.smairio.gigactl.Control"
@@ -103,6 +116,11 @@ def _curves_variant(engine: curve.ProfileEngine) -> GLib.Variant:
 
 
 class Daemon:
+    # Ticks are 2s apart; 3 consecutive failures (~6s) with no successful
+    # drive means the fans may be stranded at a manual duty — trip the
+    # failsafe and hand them back to firmware.
+    FAILSAFE_AFTER_TICKS = 3
+
     def __init__(self, ec, interval_s: int = 2,
                  authorizer: authz.Authorizer | None = None) -> None:
         self.ec = ec
@@ -122,6 +140,13 @@ class Daemon:
         # seconds is reported once rather than every tick.
         self._engine_fault: str | None = None
         self._last_ec_status = ""
+        self._tick_failures = 0
+        self._failsafe_tripped = False
+        self._failsafe_restored = False
+        # The fan choice a trip set aside (state.snapshot's fan part). A trip is
+        # a temporary handback, not the user's decision: saves keep this, and
+        # the user's next fan choice starts from it.
+        self._before_trip: dict | None = None
 
     # --- lifecycle -----------------------------------------------------------
     def run(self) -> None:
@@ -376,6 +401,7 @@ class Daemon:
         # NOT persist it; the last real profile stays saved and is restored on
         # the next start/reboot.
         self.engine.set_manual()
+        self._rearm_failsafe()
         self._notify_fan_state()
         invocation.return_value(None)
 
@@ -385,6 +411,9 @@ class Daemon:
         self.engine.set_profile(curve.FIRMWARE)
         for f in fans.FANS:
             fans.restore_auto(self.ec, f)
+        # Only once the handback has landed: if the EC refused it, the error
+        # goes back to the caller and a tripped failsafe keeps retrying.
+        self._rearm_failsafe()
         self._persist()
         self._notify_fan_state()
         invocation.return_value(None)
@@ -404,6 +433,7 @@ class Daemon:
 
     # --- telemetry loop ------------------------------------------------------
     def _tick(self) -> bool:
+        reached = False  # did this tick read the EC and drive what it had to?
         try:
             t = read_telemetry(self.ec)
             self._conn.emit_signal(
@@ -415,10 +445,76 @@ class Daemon:
                 ),
             )
             self._run_engine(t.cpu_temp, t.gpu_temp, quiet=True)
+            if self._engine_fault and not self._failsafe_tripped:
+                self._note_tick_failure()
+            else:
+                self._tick_failures = 0
+                reached = True
         except Exception as exc:
             print(f"gigactld: tick failed: {exc}", flush=True)
+            self._note_tick_failure()
+        if self._failsafe_tripped:
+            if not self._failsafe_restored:
+                # Refused by the same failure that tripped us, most likely; so
+                # keep trying every tick until the EC takes the fans back.
+                self._failsafe_restored = self._try_restore_fans()
+            self._engine_fault = self._failsafe_status(reached)
         self._sync_ec_status()
         return True  # keep the timeout running
+
+    def _try_restore_fans(self) -> bool:
+        """Best-effort firmware handback of both fans; True iff both landed."""
+        landed = True
+        for f in fans.FANS:
+            try:
+                fans.restore_auto(self.ec, f)
+            except Exception:
+                landed = False
+        return landed
+
+    def _rearm_failsafe(self) -> None:
+        """The user has taken control again. Forget the trip — including a
+        handback still waiting to be retried, which would otherwise land on the
+        next tick and hand the fans to firmware underneath the user's choice —
+        and count failures from zero."""
+        self._failsafe_tripped = False
+        self._failsafe_restored = False
+        self._tick_failures = 0
+        self._engine_fault = None
+        self._before_trip = None
+
+    def _resume_from_trip(self) -> None:
+        """Before the user's next fan choice after a trip, give the engine back
+        what the trip emptied, so that choice starts from where they were: a
+        custom curve, or the other fan's half of a split one, is not lost."""
+        if self._before_trip:
+            state.restore(self.engine, self._before_trip)
+
+    def _note_tick_failure(self) -> None:
+        """Count a failed tick; on the threshold, trip the failsafe.
+
+        Tripping drops the profile to firmware at once, whether or not the
+        handback can land — claiming 'max' while nothing drives the fans is the
+        #25 failure this watchdog exists to end. The tick then hands the fans
+        back (best-effort per fan) and keeps retrying until it lands.
+        """
+        if self.engine.profile == curve.FIRMWARE and not self._failsafe_tripped:
+            return  # firmware already has the fans: no profile to drop
+        self._tick_failures += 1
+        if self._tick_failures < self.FAILSAFE_AFTER_TICKS or self._failsafe_tripped:
+            return
+        self._failsafe_tripped = True
+        self._failsafe_restored = False
+        self._before_trip = state.snapshot(self.engine)
+        self.engine.set_profile(curve.FIRMWARE)
+        self._notify_fan_state()
+
+    def _failsafe_status(self, reached: bool) -> str | None:
+        """EcStatus while tripped: what is still wrong, or nothing at all once
+        the EC answers again and the fans are on firmware."""
+        if not self._failsafe_restored:
+            return _FAILSAFE_PENDING
+        return None if reached else _FAILSAFE_LANDED
 
     def _run_engine(self, cpu_temp: int, gpu_temp: int, *,
                     quiet: bool = False) -> None:
@@ -441,10 +537,12 @@ class Daemon:
                 self._engine_fault = (
                     f"the fan profile '{self.engine.profile}' is not being "
                     f"applied: {exc}")
+                self.engine.retry_next_tick()
                 if not quiet:
                     raise
                 return
-        self._engine_fault = None
+        if not self._failsafe_tripped:
+            self._engine_fault = None
 
     def _apply_now(self) -> None:
         t = read_telemetry(self.ec)
@@ -452,7 +550,10 @@ class Daemon:
 
     def _persist(self) -> None:
         try:
-            state.save(self.state_path, state.snapshot(self.engine, self.keyboard))
+            data = state.snapshot(self.engine, self.keyboard)
+            if self._before_trip:  # a trip is not the user's choice; keep theirs
+                data.update(self._before_trip)
+            state.save(self.state_path, data)
         except Exception as exc:
             print(f"gigactld: could not persist state: {exc}", flush=True)
 
@@ -461,6 +562,7 @@ class Daemon:
         (name,) = params.unpack()
         if not self._authorized(sender, invocation):
             return
+        self._resume_from_trip()
         try:
             self.engine.set_profile(name)
         except ValueError as exc:
@@ -469,7 +571,11 @@ class Daemon:
         if name == curve.FIRMWARE:
             for f in fans.FANS:
                 fans.restore_auto(self.ec, f)
+            # Only once the handback has landed, as RestoreFirmware does: if
+            # the EC refused it, a tripped failsafe keeps retrying.
+            self._rearm_failsafe()
         else:
+            self._rearm_failsafe()
             self._apply_now()  # take effect immediately, not on the next tick
         self._persist()
         self._notify_fan_state()
@@ -479,11 +585,13 @@ class Daemon:
         which, points, linked = params.unpack()
         if not self._authorized(sender, invocation):
             return
+        self._resume_from_trip()
         try:
             self.engine.set_one_curve(which, points, linked)
         except ValueError as exc:
             invocation.return_dbus_error(f"{_ERR}.InvalidArgs", str(exc))
             return
+        self._rearm_failsafe()
         self._apply_now()
         self._persist()
         self._notify_fan_state()

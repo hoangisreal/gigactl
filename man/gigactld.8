@@ -82,6 +82,7 @@ and
 .BR SetKeyboardEnabled .
 Properties:
 .BR DaemonVersion ,
+.BR EcStatus ,
 .BR ActiveProfile ,
 .BR Telemetry ,
 .B KeyboardState
@@ -126,7 +127,17 @@ after
 .BR \-\-restore-firmware .
 .SH NOTES
 If the daemon is stopped, the fans return to firmware control rather than
-staying where it left them. Recovering by hand, should it ever be needed:
+staying where it left them. The same happens while it runs, if it cannot read
+the temperatures or drive the fans for three polls in a row (about six seconds
+at the default interval): it hands both fans back to the firmware curve, reports
+the active profile as
+.BR firmware ,
+and says why in
+.B EcStatus
+for as long as the trouble lasts. Choosing a profile, a curve, a manual duty or
+firmware auto takes control back,
+and a restart tries the saved profile again. Recovering by hand, should it ever
+be needed:
 .PP
 .RS
 .EX

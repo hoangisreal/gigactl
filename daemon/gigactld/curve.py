@@ -153,6 +153,12 @@ class ProfileEngine:
         self.profile = CUSTOM
         self._reset_state()
 
+    def retry_next_tick(self) -> None:
+        """Forget the last applied duty/temp after a failed EC write, so the
+        next tick computes (and attempts) the duty again instead of believing
+        a write that never landed is already in effect."""
+        self._reset_state()
+
     def set_manual(self) -> None:
         """A manual duty override is in effect; the engine stops driving until
         a profile is (re)selected."""
