@@ -261,12 +261,30 @@ def test_a_refused_handback_is_not_reported_as_done(make_daemon):
     assert "keeps trying" in status, status
 
 
-def test_a_handback_that_lands_later_is_reported_when_it_does(make_daemon):
-    """When the EC recovers, the retried handback lands. From then on the
-    status should say where the fans are — announced, so an open window
-    notices — rather than that the daemon is still trying."""
+def test_once_the_ec_recovers_the_warning_clears_and_firmware_stays(make_daemon):
+    """EcStatus is empty whenever the EC does as it is told (the CLI and the
+    banner both rely on that). Once the retried handback lands and the EC
+    answers again, nothing is wrong any more: the warning clears — announced,
+    so an open window notices — and the profile stays 'firmware' until the
+    user picks one, which is what tells the story."""
     d = _tripped_with_refused_handback(make_daemon)
     d._tick()
+    assert _get(d, "EcStatus").get_string() == ""
+    assert _announced(d, "EcStatus") == ""
+    assert _get(d, "ActiveProfile").get_string() == "firmware"
+
+
+def test_a_handback_that_landed_while_reads_still_fail_says_both(make_daemon):
+    """Reads failing while writes still land: the handback goes through at
+    once, but the daemon still cannot see the temperatures — that is still a
+    problem, and the status should say where the fans are and that it is not
+    over."""
+    d = _driving(make_daemon)
+
+    def dead_read(off):
+        raise OSError("EC gone")
+    d.ec.read_u8 = dead_read
+    for _ in range(d.FAILSAFE_AFTER_TICKS):
+        d._tick()
     status = _get(d, "EcStatus").get_string()
-    assert "handed back to firmware auto" in status, status
-    assert _announced(d, "EcStatus") == status
+    assert "handed back to firmware auto" in status and "keeps trying" in status, status

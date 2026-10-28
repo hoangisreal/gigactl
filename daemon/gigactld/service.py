@@ -20,13 +20,15 @@ from .telemetry import read_telemetry  # noqa: E402
 
 _ERR = "io.github.smairio.gigactl.Error"
 
-# What EcStatus says once the failsafe has tripped. The app shows these after
-# "Nothing is reaching the hardware: ", hence the lower-case start. The two must
-# stay distinct: the handback is an EC write too, and the failure that trips the
-# failsafe usually refuses it as well.
+# What EcStatus says while a tripped failsafe's trouble lasts. The app shows
+# these after "Nothing is reaching the hardware: ", hence the lower-case start.
+# The two must stay distinct: the handback is an EC write too, and the failure
+# that trips the failsafe usually refuses it as well. Once the EC answers again
+# and the fans are on firmware, EcStatus is empty — nothing is wrong any more,
+# and the profile reading 'firmware' is what tells the story.
 _FAILSAFE_LANDED = (
     "the fans could not be controlled for several seconds, so they were "
-    "handed back to firmware auto. Pick a profile to take control again.")
+    "handed back to firmware auto. The daemon keeps trying to reach them.")
 _FAILSAFE_PENDING = (
     "the fans could not be controlled for several seconds, and handing them "
     "back to firmware auto failed too. The daemon keeps trying.")
@@ -427,6 +429,7 @@ class Daemon:
 
     # --- telemetry loop ------------------------------------------------------
     def _tick(self) -> bool:
+        reached = False  # did this tick read the EC and drive what it had to?
         try:
             t = read_telemetry(self.ec)
             self._conn.emit_signal(
@@ -442,16 +445,16 @@ class Daemon:
                 self._note_tick_failure()
             else:
                 self._tick_failures = 0
+                reached = True
         except Exception as exc:
             print(f"gigactld: tick failed: {exc}", flush=True)
             self._note_tick_failure()
-        if self._failsafe_tripped and not self._failsafe_restored:
-            # The trip's own restore may have been refused by the same
-            # failure that tripped us; keep retrying while tripped so the
-            # fans are handed back as soon as the EC accepts writes again.
-            self._failsafe_restored = self._try_restore_fans()
-            if self._failsafe_restored:
-                self._engine_fault = _FAILSAFE_LANDED
+        if self._failsafe_tripped:
+            if not self._failsafe_restored:
+                # Refused by the same failure that tripped us, most likely; so
+                # keep trying every tick until the EC takes the fans back.
+                self._failsafe_restored = self._try_restore_fans()
+            self._engine_fault = self._failsafe_status(reached)
         self._sync_ec_status()
         return True  # keep the timeout running
 
@@ -476,22 +479,27 @@ class Daemon:
         self._engine_fault = None
 
     def _note_tick_failure(self) -> None:
-        """Count a failed tick; on the threshold, hand the fans to firmware.
+        """Count a failed tick; on the threshold, trip the failsafe.
 
-        The restore itself is best-effort per fan: the EC refusing writes is
-        one of the failures that lands us here, and that must not stop the
-        profile being dropped — claiming 'max' while nothing drives the fans
-        is the #25 failure this watchdog exists to end.
+        Tripping drops the profile to firmware at once, whether or not the
+        handback can land — claiming 'max' while nothing drives the fans is the
+        #25 failure this watchdog exists to end. The tick then hands the fans
+        back (best-effort per fan) and keeps retrying until it lands.
         """
         self._tick_failures += 1
         if self._tick_failures < self.FAILSAFE_AFTER_TICKS or self._failsafe_tripped:
             return
         self._failsafe_tripped = True
-        self._failsafe_restored = self._try_restore_fans()
+        self._failsafe_restored = False
         self.engine.set_profile(curve.FIRMWARE)
         self._notify_fan_state()
-        self._engine_fault = (_FAILSAFE_LANDED if self._failsafe_restored
-                              else _FAILSAFE_PENDING)
+
+    def _failsafe_status(self, reached: bool) -> str | None:
+        """EcStatus while tripped: what is still wrong, or nothing at all once
+        the EC answers again and the fans are on firmware."""
+        if not self._failsafe_restored:
+            return _FAILSAFE_PENDING
+        return None if reached else _FAILSAFE_LANDED
 
     def _run_engine(self, cpu_temp: int, gpu_temp: int, *,
                     quiet: bool = False) -> None:
