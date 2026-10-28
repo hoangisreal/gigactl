@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Gate T1.3 check: keyboard master-enable + one colour + brightness on GE.
+"""Check the keyboard backlight: master enable, one colour, brightness.
 
-    sudo python3 tools/g2_keyboard.py
+    sudo python3 tools/keyboard_check.py
 
 Sets the single-zone backlight to orange at full brightness for ~6s so you
 can see it, then returns it to the factory blue (0,0,200). The EC forgets

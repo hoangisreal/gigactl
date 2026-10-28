@@ -1,5 +1,5 @@
 #!/bin/bash
-# probe.sh — read-only hardware probe for gigactl model verification (Phase 0).
+# probe.sh — read-only hardware probe, the first thing to run on a new model.
 #
 # This script NEVER writes to the EC, sysfs, or any device. It only reads:
 # DMI strings, kernel/module state, sysfs listings, hwmon/powercap values,

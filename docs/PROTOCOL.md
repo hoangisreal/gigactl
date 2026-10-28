@@ -103,7 +103,7 @@ Read-only probe (`tools/ec_read.py` via `/dev/port` — Fedora kernels ship no
 ec_sys debugfs): CPU 43 °C matching coretemp, DUT1 raw 71 (~28 %), fan 1
 ≈2,372 RPM, fan 2 stopped at idle — all consistent across samples.
 
-First controlled write (`tools/g2_measure.py --fan 1`, 80 % for 5 s):
+First controlled write (`tools/fan_check.py --fan 1`, 80 % for 5 s):
 DUT1 rose 27 % → 80 % while DUT2 stayed 0 %, RPM1 rose 2,372 → ~4,991, and
 the fan returned to firmware duty (~30 %) on handback. The fan-2 run was
 the mirror image: DUT2 0 % → 80 %, RPM2 0 → ~4,637, DUT1/RPM1 untouched,
@@ -124,7 +124,7 @@ firmware idle (27 %/0 %) to the curve duty (43 %/41 %, ~3,360/3,100 RPM)
 over `/dev/port` with no engine fault across 4 ticks, then handed both
 fans back to firmware.
 
-Keyboard (`tools/g2_keyboard.py`, same session): master-enable via
+Keyboard (`tools/keyboard_check.py`, same session): master-enable via
 `0xC4`, then colour set via `0xCA` — the keys visibly switched to orange
 at full brightness and back to the factory blue on command. The
 single-zone RGB path, including the B,R,G byte order, works on the G5 GE

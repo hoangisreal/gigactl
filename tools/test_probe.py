@@ -1,6 +1,6 @@
 """Safety contract for tools/probe.sh: it must stay read-only.
 
-The probe is the Phase-0 tool run on unverified hardware. If a future edit
+The probe is the first tool run on a model nobody here has tested. If an edit
 adds a write (EC doorbell, sysfs store, modprobe, dd of=...), these tests
 fail before the script ever touches a machine.
 """
@@ -30,8 +30,8 @@ def test_reads_documented_ec_offsets_only():
     assert "docs/PROTOCOL.md" in PROBE
 
 
-def test_g2_measure_always_restores_and_refuses_hot():
-    tool = pathlib.Path(__file__).with_name("g2_measure.py").read_text()
+def test_fan_check_always_restores_and_refuses_hot():
+    tool = pathlib.Path(__file__).with_name("fan_check.py").read_text()
     assert "finally:" in tool and "restore_auto" in tool, \
         "the controlled write must hand the fan back whatever happens"
     assert "MAX_START_TEMP_C" in tool, "must refuse to run on a hot machine"

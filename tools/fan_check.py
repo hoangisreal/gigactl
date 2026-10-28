@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Gate-G2 measurement: drive ONE fan to a distinctive duty, watch registers.
+"""Drive ONE fan to a distinctive duty and watch both duty registers.
 
 This is the first controlled EC *write* on an unverified model, designed to
 settle the DUT1/DUT2 question in docs/PROTOCOL.md without guessing:
 
-    sudo python3 tools/g2_measure.py --fan 1
+    sudo python3 tools/fan_check.py --fan 1
 
 It refuses to run hot, drives the chosen fan to 80% for ~5s while sampling
 both duty registers and RPMs, and ALWAYS hands the fan back to firmware
@@ -43,12 +43,12 @@ def main() -> int:
     parser.add_argument("--fan", type=int, choices=(1, 2), required=True)
     args = parser.parse_args()
     if pathlib.Path("/proc/self/status").exists() and _uid() != 0:
-        print("g2_measure: run with sudo (needs /dev/port access)")
+        print("fan_check: run with sudo (needs /dev/port access)")
         return 2
     ec = EmbeddedController(backend=DevPortBackend())
     start = sample(ec, "before")
     if start.cpu_temp >= MAX_START_TEMP_C or start.gpu_temp >= MAX_START_TEMP_C:
-        print(f"g2_measure: refusing — already hot "
+        print(f"fan_check: refusing — already hot "
               f"(cpu={start.cpu_temp}C gpu={start.gpu_temp}C); cool down first")
         return 1
     print(f">>> driving fan {args.fan} to {TEST_DUTY_PCT}% — "
