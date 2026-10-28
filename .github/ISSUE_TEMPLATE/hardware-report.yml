@@ -9,7 +9,7 @@ body:
 
         A report can earn your model a 👍 ("reported working by a user") in the README. Only models the maintainer has measured get ✅.
 
-        Every command on this form only reads, except the optional test at the end. None of them shows a serial number.
+        The commands this form asks you to paste only read, except the optional test at the end. The checkboxes name commands you may already have tried; those change settings, through the daemon, like the app does. None of the commands shows a serial number.
 
   - type: textarea
     id: dmi
