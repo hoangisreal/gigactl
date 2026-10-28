@@ -20,6 +20,17 @@ from .telemetry import read_telemetry  # noqa: E402
 
 _ERR = "io.github.smairio.gigactl.Error"
 
+# What EcStatus says once the failsafe has tripped. The app shows these after
+# "Nothing is reaching the hardware: ", hence the lower-case start. The two must
+# stay distinct: the handback is an EC write too, and the failure that trips the
+# failsafe usually refuses it as well.
+_FAILSAFE_LANDED = (
+    "the fans could not be controlled for several seconds, so they were "
+    "handed back to firmware auto. Pick a profile to take control again.")
+_FAILSAFE_PENDING = (
+    "the fans could not be controlled for several seconds, and handing them "
+    "back to firmware auto failed too. The daemon keeps trying.")
+
 BUS_NAME = "io.github.smairio.gigactl"
 OBJECT_PATH = "/io/github/smairio/gigactl"
 INTERFACE = "io.github.smairio.gigactl.Control"
@@ -384,8 +395,7 @@ class Daemon:
         # NOT persist it; the last real profile stays saved and is restored on
         # the next start/reboot.
         self.engine.set_manual()
-        self._failsafe_tripped = False
-        self._tick_failures = 0
+        self._rearm_failsafe()
         self._notify_fan_state()
         invocation.return_value(None)
 
@@ -395,6 +405,9 @@ class Daemon:
         self.engine.set_profile(curve.FIRMWARE)
         for f in fans.FANS:
             fans.restore_auto(self.ec, f)
+        # Only once the handback has landed: if the EC refused it, the error
+        # goes back to the caller and a tripped failsafe keeps retrying.
+        self._rearm_failsafe()
         self._persist()
         self._notify_fan_state()
         invocation.return_value(None)
@@ -437,6 +450,8 @@ class Daemon:
             # failure that tripped us; keep retrying while tripped so the
             # fans are handed back as soon as the EC accepts writes again.
             self._failsafe_restored = self._try_restore_fans()
+            if self._failsafe_restored:
+                self._engine_fault = _FAILSAFE_LANDED
         self._sync_ec_status()
         return True  # keep the timeout running
 
@@ -449,6 +464,16 @@ class Daemon:
             except Exception:
                 landed = False
         return landed
+
+    def _rearm_failsafe(self) -> None:
+        """The user has taken control again. Forget the trip — including a
+        handback still waiting to be retried, which would otherwise land on the
+        next tick and hand the fans to firmware underneath the user's choice —
+        and count failures from zero."""
+        self._failsafe_tripped = False
+        self._failsafe_restored = False
+        self._tick_failures = 0
+        self._engine_fault = None
 
     def _note_tick_failure(self) -> None:
         """Count a failed tick; on the threshold, hand the fans to firmware.
@@ -464,9 +489,9 @@ class Daemon:
         self._failsafe_tripped = True
         self._failsafe_restored = self._try_restore_fans()
         self.engine.set_profile(curve.FIRMWARE)
-        self._engine_fault = (
-            "failsafe: repeated failures driving the fans — handed back "
-            "to firmware auto; pick a profile to take control again")
+        self._notify_fan_state()
+        self._engine_fault = (_FAILSAFE_LANDED if self._failsafe_restored
+                              else _FAILSAFE_PENDING)
 
     def _run_engine(self, cpu_temp: int, gpu_temp: int, *,
                     quiet: bool = False) -> None:
@@ -516,10 +541,7 @@ class Daemon:
         except ValueError as exc:
             invocation.return_dbus_error(f"{_ERR}.InvalidArgs", str(exc))
             return
-        # The user is taking control again: re-arm the failsafe.
-        self._failsafe_tripped = False
-        self._tick_failures = 0
-        self._engine_fault = None
+        self._rearm_failsafe()
         if name == curve.FIRMWARE:
             for f in fans.FANS:
                 fans.restore_auto(self.ec, f)
@@ -538,6 +560,7 @@ class Daemon:
         except ValueError as exc:
             invocation.return_dbus_error(f"{_ERR}.InvalidArgs", str(exc))
             return
+        self._rearm_failsafe()
         self._apply_now()
         self._persist()
         self._notify_fan_state()

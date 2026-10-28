@@ -95,7 +95,7 @@ def test_a_status_change_is_announced_so_a_running_client_notices(make_daemon):
 
 
 def test_sustained_tick_failure_hands_fans_back_to_firmware(make_daemon):
-    """T2.1 watchdog: if telemetry reads keep failing, the fans may be stuck
+    """If telemetry reads keep failing, the fans may be stuck
     at the last manual duty with nothing driving them. After the threshold
     the daemon must hand both fans back to firmware and stop claiming the
     profile."""
@@ -173,3 +173,100 @@ def test_choosing_a_profile_fails_out_loud_when_it_cannot_be_applied(make_daemon
                    GLib.Variant("(s)", ("performance",)), inv)
     assert inv.error is not None, "SetProfile must not claim success"
     assert inv.error[0].endswith("EcNotWritable")
+
+
+# --- the failsafe gives way to a user taking control back ---------------------
+
+_CURVE = [(40, 30), (55, 40), (70, 60), (85, 80), (95, 100)]
+
+
+def _call(d, method, signature=None, args=()):
+    """Invoke a control method the way the bus does; returns the invocation."""
+    from conftest import Invocation
+
+    import gi
+
+    gi.require_version("Gio", "2.0")
+    from gi.repository import GLib
+
+    params = GLib.Variant(signature, args) if signature else None
+    inv = Invocation()
+    d._method_call(None, ":1.5", None, INTERFACE, method, params, inv)
+    return inv
+
+
+def _tripped_with_refused_handback(make_daemon):
+    """A daemon whose failsafe tripped while the EC refused every write, so its
+    own handback to firmware never landed; the EC then recovers."""
+    d = _driving(make_daemon)
+    d.ec.write_error = OSError("EC busy")
+    for _ in range(d.FAILSAFE_AFTER_TICKS):
+        d._tick()
+    assert d.engine.profile == "firmware"
+    d.ec.write_error = None
+    return d
+
+
+def test_a_curve_set_after_a_trip_takes_control_back(make_daemon):
+    """The curve editor is a way to take control back. Once its curve drives the
+    fans, the banner must stop calling them abandoned — and the trip's pending
+    handback must not quietly give the fans to firmware behind the curve."""
+    d = _tripped_with_refused_handback(make_daemon)
+    inv = _call(d, "SetCurve", "(sa(uu)b)", ("cpu", _CURVE, True))
+    assert inv.error is None
+    writes = len(d.ec.writes)
+    d._tick()
+    assert _get(d, "EcStatus").get_string() == ""
+    handbacks = [w for w in d.ec.writes[writes:] if w == (0xF9, 0xFF)]
+    assert not handbacks, f"fans were handed to firmware under the curve: {d.ec.writes[writes:]}"
+
+
+def test_choosing_firmware_auto_after_a_trip_clears_the_warning(make_daemon):
+    """Firmware auto chosen on purpose is a state, not a fault (DESIGN.md): once
+    the fans are where the user asked, there is nothing left to warn about."""
+    d = _tripped_with_refused_handback(make_daemon)
+    inv = _call(d, "RestoreFirmware")
+    assert inv.error is None
+    d._tick()
+    assert _get(d, "EcStatus").get_string() == ""
+
+
+def _announced(d, prop):
+    """The last value of ``prop`` the daemon announced via PropertiesChanged."""
+    for _iface, signal, params in reversed(d._conn.emissions):
+        if signal == "PropertiesChanged" and prop in params[1]:
+            return params[1][prop]
+    return None
+
+
+def test_a_trip_is_announced_so_the_profile_row_follows(make_daemon):
+    """The window and tray show the daemon's profile, not their own. A trip that
+    moves it to firmware without saying so leaves them highlighting 'Max'."""
+    d = _driving(make_daemon)
+    d.ec.write_error = OSError("EC busy")
+    for _ in range(d.FAILSAFE_AFTER_TICKS):
+        d._tick()
+    assert _announced(d, "ActiveProfile") == "firmware"
+
+
+def test_a_refused_handback_is_not_reported_as_done(make_daemon):
+    """The handback is itself an EC write, so the failure that trips the
+    failsafe usually refuses it too. Claiming the fans are on firmware auto
+    then would be the #25 lie pointing the other way."""
+    d = _driving(make_daemon)
+    d.ec.write_error = OSError("EC busy")
+    for _ in range(d.FAILSAFE_AFTER_TICKS):
+        d._tick()
+    status = _get(d, "EcStatus").get_string()
+    assert "keeps trying" in status, status
+
+
+def test_a_handback_that_lands_later_is_reported_when_it_does(make_daemon):
+    """When the EC recovers, the retried handback lands. From then on the
+    status should say where the fans are — announced, so an open window
+    notices — rather than that the daemon is still trying."""
+    d = _tripped_with_refused_handback(make_daemon)
+    d._tick()
+    status = _get(d, "EcStatus").get_string()
+    assert "handed back to firmware auto" in status, status
+    assert _announced(d, "EcStatus") == status
