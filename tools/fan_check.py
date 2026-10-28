@@ -22,6 +22,7 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "daemon"))
 
+import guard  # noqa: E402
 from gigactld import fans, telemetry  # noqa: E402
 from gigactld.ec import DevPortBackend, EmbeddedController  # noqa: E402
 
@@ -42,6 +43,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fan", type=int, choices=(1, 2), required=True)
     args = parser.parse_args()
+    reason = guard.refusal()
+    if reason:
+        print(f"fan_check: {reason}", file=sys.stderr)
+        return 1
     if pathlib.Path("/proc/self/status").exists() and _uid() != 0:
         print("fan_check: run with sudo (needs /dev/port access)")
         return 2
