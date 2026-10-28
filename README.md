@@ -34,6 +34,9 @@ worked — real evidence, and the only kind obtainable for hardware nobody here
 owns, but not a substitute for having tested it. Nothing outside the G6 KF has
 been verified by the maintainer, and the table will never say otherwise.
 
+Own a G5, G6 or G7 that the table does not list? [tools/README.md](tools/README.md)
+shows how to check it and what to send.
+
 There is a second report on the G5 MF5 that looked like a hardware failure and
 was not: the kernel's EC interface had been loaded read-only, so every reading
 was correct and every command was refused. `gfan` and the app now say that in

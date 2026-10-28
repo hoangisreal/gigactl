@@ -7,7 +7,7 @@
 # the offsets documented in docs/PROTOCOL.md.
 #
 # Usage:  ./tools/probe.sh [output-file]
-#         sudo ./tools/probe.sh docs/probe/g5-ge-fb06.txt   # for the EC section
+#         sudo ./tools/probe.sh probe.txt   # as root, to include the EC section
 set -uo pipefail
 
 OUT=${1:-}
