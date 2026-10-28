@@ -126,6 +126,14 @@ The EC exposes a command mailbox on the standard ACPI EC ports. Commands are wri
 
 Both quirks cost real debugging time and are documented in full — register maps, byte orders, dead ends and all — in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
+## Contributing
+
+Pull requests and hardware reports are welcome. [CONTRIBUTING.md](CONTRIBUTING.md)
+shows how to run the tests, and the few rules that keep the hardware safe. If
+you own a Gigabyte G5, G6 or G7, please tell us how gigactl runs on it with the
+[hardware report form](https://github.com/smairio/gigactl/issues/new?template=hardware-report.yml)
+— "it works" helps too.
+
 ## Credits
 
 - [nbfc-linux](https://github.com/nbfc-linux/nbfc-linux) — the `ec_probe` utility used for EC access
