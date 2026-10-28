@@ -231,10 +231,15 @@ def workflow_commands(path: str = RELEASE_WORKFLOW) -> str:
     return "\n".join(commands(script) for _name, script in run_steps(path))
 
 
-def apt_installed() -> set[str]:
-    """Exact package names the workflow installs by hand (not via build-dep)."""
+def apt_installed(path: str = RELEASE_WORKFLOW) -> set[str]:
+    """Exact package names the workflow installs by hand (not via build-dep).
+
+    A long install line may be continued with a trailing backslash, so those
+    lines are joined first — otherwise every package after the first line break
+    would be invisible here.
+    """
     packages = set()
-    for line in workflow_commands().splitlines():
+    for line in re.sub(r"\\\n", " ", workflow_commands(path)).splitlines():
         if "apt-get install" not in line:
             continue
         args = line.split("apt-get install", 1)[1].split()
