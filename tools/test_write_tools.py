@@ -1,8 +1,8 @@
-"""The tools that write the EC ask the guard first, and touch nothing when it
-refuses.
+"""The tools that write the EC: each asks first and touches nothing when the
+answer is no, and keyboard_check puts the backlight back afterwards.
 
-Each test swaps in a fake EC as well as a refusing guard, so even a tool that
-ignored the guard could not reach real hardware from here.
+Every test hands the tools a fake EC, so even a tool that ignored the guard
+could not reach real hardware from here.
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def test_a_tool_touches_nothing_when_the_guard_refuses(name, monkeypatch,
 def test_a_read_only_ec_is_refused_before_anything_is_written(name, monkeypatch,
                                                                 fake_ec, capsys):
     """ec_sys loaded without write support (#25): say so up front, rather than
-    fail half-way through a test with the fan already driven."""
+    die on the first write with a traceback."""
     if name == "daemon_smoke":
         pytest.importorskip("gi")
     tool = importlib.import_module(name)

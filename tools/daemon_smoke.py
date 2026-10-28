@@ -27,11 +27,11 @@ class _Conn:
 
 
 def main() -> int:
-    # Covers the daemon above all: this runs a second ProfileEngine, and two
-    # engines driving the same fans would fight over every tick.
     # The daemon's own backend choice: ec_sys if loaded, /dev/port only if
     # not. Creating it touches no hardware; the checks come first.
     ec = EmbeddedController()
+    # The daemon check matters most here: this runs a second ProfileEngine,
+    # and two engines driving the same fans would fight over every tick.
     reason = guard.refusal() or ec.unwritable_reason()
     if reason:
         print(f"daemon_smoke: {reason}", file=sys.stderr)
