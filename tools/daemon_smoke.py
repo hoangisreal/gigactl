@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live smoke test: the real Daemon driving the real EC on Fedora.
+"""Live smoke test: the real Daemon driving the real EC.
 
     sudo python3 tools/daemon_smoke.py
 
@@ -7,7 +7,7 @@ Runs the daemon's own tick loop in-process (no D-Bus) with the
 'performance' profile for ~8s, printing telemetry each tick, then ALWAYS
 hands both fans back to firmware auto in a finally block. This exercises
 the exact code path gigactld runs — profile engine, mailbox writes,
-verify-by-telemetry — against the DevPortBackend Fedora requires.
+verify-by-telemetry — on the EC backend gigactld itself would pick.
 """
 import pathlib
 import sys
@@ -17,7 +17,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "daemon"
 
 import guard  # noqa: E402
 from gigactld import fans, telemetry  # noqa: E402
-from gigactld.ec import DevPortBackend, EmbeddedController  # noqa: E402
+from gigactld.ec import EmbeddedController  # noqa: E402
 from gigactld.service import Daemon  # noqa: E402
 
 
@@ -29,11 +29,13 @@ class _Conn:
 def main() -> int:
     # Covers the daemon above all: this runs a second ProfileEngine, and two
     # engines driving the same fans would fight over every tick.
-    reason = guard.refusal()
+    # The daemon's own backend choice: ec_sys if loaded, /dev/port only if
+    # not. Creating it touches no hardware; the checks come first.
+    ec = EmbeddedController()
+    reason = guard.refusal() or ec.unwritable_reason()
     if reason:
         print(f"daemon_smoke: {reason}", file=sys.stderr)
         return 1
-    ec = EmbeddedController(backend=DevPortBackend())
     daemon = Daemon(ec)
     daemon._conn = _Conn()
     daemon.state_path = "/tmp/gigactl-smoke-state.json"

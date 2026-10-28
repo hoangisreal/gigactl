@@ -19,7 +19,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "daemon"
 
 import guard  # noqa: E402
 from gigactld import keyboard, state  # noqa: E402
-from gigactld.ec import DevPortBackend, EmbeddedController  # noqa: E402
+from gigactld.ec import EmbeddedController  # noqa: E402
 
 TEST_COLOR = (255, 102, 0)  # orange — unmistakably not the factory blue
 SHOW_FOR_S = 6
@@ -54,11 +54,13 @@ def check(ec, restore_to: keyboard.KeyboardState, pause=time.sleep) -> None:
 
 
 def main() -> int:
-    reason = guard.refusal()
+    # The daemon's own backend choice: ec_sys if loaded, /dev/port only if
+    # not. Creating it touches no hardware; the checks come first.
+    ec = EmbeddedController()
+    reason = guard.refusal() or ec.unwritable_reason()
     if reason:
         print(f"keyboard_check: {reason}", file=sys.stderr)
         return 1
-    ec = EmbeddedController(backend=DevPortBackend())
     check(ec, restore_target())
     return 0
 

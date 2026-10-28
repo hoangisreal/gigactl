@@ -24,7 +24,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "daemon"
 
 import guard  # noqa: E402
 from gigactld import fans, telemetry  # noqa: E402
-from gigactld.ec import DevPortBackend, EmbeddedController  # noqa: E402
+from gigactld.ec import EmbeddedController  # noqa: E402
 
 TEST_DUTY_PCT = 80
 MAX_START_TEMP_C = 75
@@ -43,14 +43,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fan", type=int, choices=(1, 2), required=True)
     args = parser.parse_args()
-    reason = guard.refusal()
+    # The daemon's own backend choice: ec_sys if loaded, /dev/port only if
+    # not. Creating it touches no hardware; the checks come first.
+    ec = EmbeddedController()
+    reason = guard.refusal() or ec.unwritable_reason()
     if reason:
         print(f"fan_check: {reason}", file=sys.stderr)
         return 1
     if pathlib.Path("/proc/self/status").exists() and _uid() != 0:
-        print("fan_check: run with sudo (needs /dev/port access)")
+        print("fan_check: run with sudo (the EC needs root)")
         return 2
-    ec = EmbeddedController(backend=DevPortBackend())
     start = sample(ec, "before")
     if start.cpu_temp >= MAX_START_TEMP_C or start.gpu_temp >= MAX_START_TEMP_C:
         print(f"fan_check: refusing — already hot "

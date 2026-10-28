@@ -41,6 +41,24 @@ def test_a_tool_touches_nothing_when_the_guard_refuses(name, monkeypatch,
     assert "the gigactl daemon is running" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("name", sorted(WRITERS))
+def test_a_read_only_ec_is_refused_before_anything_is_written(name, monkeypatch,
+                                                                fake_ec, capsys):
+    """ec_sys loaded without write support (#25): say so up front, rather than
+    fail half-way through a test with the fan already driven."""
+    if name == "daemon_smoke":
+        pytest.importorskip("gi")
+    tool = importlib.import_module(name)
+    fake_ec.unwritable_reason = lambda: "the kernel's EC interface is read-only"
+    monkeypatch.setattr(tool, "EmbeddedController", lambda *a, **k: fake_ec)
+    monkeypatch.setattr(guard, "refusal", lambda **_: None)
+    monkeypatch.setattr(sys, "argv", [f"{name}.py", *WRITERS[name]])
+
+    assert tool.main() == 1
+    assert fake_ec.reads == [] and fake_ec.writes == []
+    assert "read-only" in capsys.readouterr().err
+
+
 def test_every_tool_that_writes_the_ec_is_held_to_the_guard():
     """A new tool that writes the EC has to join WRITERS above, and so be
     tested to ask first. ec_read.py only reads, and must not need to."""
