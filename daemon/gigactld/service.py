@@ -143,6 +143,10 @@ class Daemon:
         self._tick_failures = 0
         self._failsafe_tripped = False
         self._failsafe_restored = False
+        # The fan choice a trip set aside (state.snapshot's fan part). A trip is
+        # a temporary handback, not the user's decision: saves keep this, and
+        # the user's next fan choice starts from it.
+        self._before_trip: dict | None = None
 
     # --- lifecycle -----------------------------------------------------------
     def run(self) -> None:
@@ -477,6 +481,14 @@ class Daemon:
         self._failsafe_restored = False
         self._tick_failures = 0
         self._engine_fault = None
+        self._before_trip = None
+
+    def _resume_from_trip(self) -> None:
+        """Before the user's next fan choice after a trip, give the engine back
+        what the trip emptied, so that choice starts from where they were: a
+        custom curve, or the other fan's half of a split one, is not lost."""
+        if self._before_trip:
+            state.restore(self.engine, self._before_trip)
 
     def _note_tick_failure(self) -> None:
         """Count a failed tick; on the threshold, trip the failsafe.
@@ -486,11 +498,14 @@ class Daemon:
         #25 failure this watchdog exists to end. The tick then hands the fans
         back (best-effort per fan) and keeps retrying until it lands.
         """
+        if self.engine.profile == curve.FIRMWARE and not self._failsafe_tripped:
+            return  # firmware already has the fans: no profile to drop
         self._tick_failures += 1
         if self._tick_failures < self.FAILSAFE_AFTER_TICKS or self._failsafe_tripped:
             return
         self._failsafe_tripped = True
         self._failsafe_restored = False
+        self._before_trip = state.snapshot(self.engine)
         self.engine.set_profile(curve.FIRMWARE)
         self._notify_fan_state()
 
@@ -535,7 +550,10 @@ class Daemon:
 
     def _persist(self) -> None:
         try:
-            state.save(self.state_path, state.snapshot(self.engine, self.keyboard))
+            data = state.snapshot(self.engine, self.keyboard)
+            if self._before_trip:  # a trip is not the user's choice; keep theirs
+                data.update(self._before_trip)
+            state.save(self.state_path, data)
         except Exception as exc:
             print(f"gigactld: could not persist state: {exc}", flush=True)
 
@@ -544,16 +562,20 @@ class Daemon:
         (name,) = params.unpack()
         if not self._authorized(sender, invocation):
             return
+        self._resume_from_trip()
         try:
             self.engine.set_profile(name)
         except ValueError as exc:
             invocation.return_dbus_error(f"{_ERR}.InvalidArgs", str(exc))
             return
-        self._rearm_failsafe()
         if name == curve.FIRMWARE:
             for f in fans.FANS:
                 fans.restore_auto(self.ec, f)
+            # Only once the handback has landed, as RestoreFirmware does: if
+            # the EC refused it, a tripped failsafe keeps retrying.
+            self._rearm_failsafe()
         else:
+            self._rearm_failsafe()
             self._apply_now()  # take effect immediately, not on the next tick
         self._persist()
         self._notify_fan_state()
@@ -563,6 +585,7 @@ class Daemon:
         which, points, linked = params.unpack()
         if not self._authorized(sender, invocation):
             return
+        self._resume_from_trip()
         try:
             self.engine.set_one_curve(which, points, linked)
         except ValueError as exc:

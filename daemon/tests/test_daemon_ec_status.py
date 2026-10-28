@@ -288,3 +288,69 @@ def test_a_handback_that_landed_while_reads_still_fail_says_both(make_daemon):
         d._tick()
     status = _get(d, "EcStatus").get_string()
     assert "handed back to firmware auto" in status and "keeps trying" in status, status
+
+
+def test_choosing_firmware_while_the_ec_still_refuses_keeps_the_handback_pending(make_daemon):
+    """The app's Firmware button, the curve page and the tray all ask for
+    SetProfile('firmware'). If the EC still refuses writes, that request fails,
+    and the failsafe must go on trying to hand the fans back: otherwise they
+    could stay at a stale duty after the EC recovers."""
+    d = _driving(make_daemon)
+    d.ec.write_error = OSError("EC busy")
+    for _ in range(d.FAILSAFE_AFTER_TICKS):
+        d._tick()
+    assert _call(d, "SetProfile", "(s)", ("firmware",)).error is not None
+    d.ec.write_error = None
+    d._tick()
+    handbacks = [w for w in d.ec.writes if w == (0xF9, 0xFF)]
+    assert len(handbacks) == 2, d.ec.writes
+
+
+def _trip_after_custom_curve(d):
+    """A custom curve is driving the fans; then the EC stops answering (reads
+    fail) long enough to trip the failsafe, and comes back."""
+    assert _call(d, "SetCurve", "(sa(uu)b)", ("cpu", _CURVE, True)).error is None
+
+    def dead_read(off):
+        raise OSError("EC gone")
+    d.ec.read_u8 = dead_read
+    for _ in range(d.FAILSAFE_AFTER_TICKS):
+        d._tick()
+    assert _get(d, "ActiveProfile").get_string() == "firmware"
+    del d.ec.read_u8  # the EC answers again
+
+
+def test_a_trip_does_not_overwrite_the_saved_choice(make_daemon):
+    """A trip is a temporary handback, not the user's decision. Whatever is
+    saved next — a keyboard change, say — must keep the profile and curve the
+    user chose, so a restart tries them again, as gigactld(8) promises."""
+    import json
+    d = make_daemon()
+    _trip_after_custom_curve(d)
+    assert _call(d, "SetKeyboardBrightness", "(u)", (40,)).error is None
+    saved = json.load(open(d.state_path))
+    assert saved["profile"] == "custom"
+    assert saved["cpu"] == [list(p) for p in _CURVE]
+
+
+def test_the_custom_curve_survives_a_trip(make_daemon):
+    """The trip left the engine driving nothing; choosing 'custom' afterwards
+    must bring back the user's curve, not fail with 'no custom curve set'."""
+    d = make_daemon()
+    _trip_after_custom_curve(d)
+    assert _call(d, "SetProfile", "(s)", ("custom",)).error is None
+    assert _get(d, "ActiveProfile").get_string() == "custom"
+
+
+def test_nothing_trips_when_the_fans_are_already_on_firmware(make_daemon):
+    """With firmware auto chosen there is no profile to drop and nothing to
+    hand back: failing reads are logged, and nothing is written or announced."""
+    d = make_daemon()  # a fresh daemon is on firmware
+
+    def dead_read(off):
+        raise OSError("EC gone")
+    d.ec.read_u8 = dead_read
+    for _ in range(d.FAILSAFE_AFTER_TICKS + 2):
+        d._tick()
+    assert not [w for w in d.ec.writes if w == (0xF9, 0xFF)], d.ec.writes
+    assert _get(d, "EcStatus").get_string() == ""
