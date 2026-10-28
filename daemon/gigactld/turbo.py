@@ -30,6 +30,14 @@ class TurboControl:
         except OSError:
             return False
 
+    def state(self) -> tuple[bool, bool]:
+        """``(available, enabled)`` right now, never raising: a missing knob
+        reads as unavailable and off."""
+        try:
+            return self.available(), self.enabled()
+        except TurboUnavailable:
+            return False, False
+
     def enabled(self) -> bool:
         """Live state: True when turbo is allowed (no_turbo == 0)."""
         try:
@@ -46,8 +54,7 @@ class TurboControl:
                 f.write("0" if on else "1")
         except FileNotFoundError as exc:
             raise TurboUnavailable(
-                "this machine has no turbo boost switch to change "
-                "(it needs the intel_pstate driver)") from exc
+                "this machine has no turbo boost switch to change") from exc
         except PermissionError as exc:
             # intel_pstate answers EPERM when turbo is disabled below it.
             raise TurboUnavailable(

@@ -141,3 +141,58 @@ def test_turbo_locked_by_the_firmware_is_explained_in_words(make_daemon, tmp_pat
                    GLib.Variant("(b)", (True,)), inv)
     assert inv.error is not None
     assert "BIOS" in inv.error[1] and "Errno" not in inv.error[1], inv.error
+
+
+class _RecordingAuthorizer:
+    """Answers polkit with ``allow`` and remembers which actions were asked."""
+
+    def __init__(self, allow: bool) -> None:
+        self.allow = allow
+        self.asked = []
+
+    def check(self, sender, action):
+        self.asked.append(action)
+        return self.allow
+
+
+def test_set_turbo_boost_asks_polkit_for_the_cpu_action_and_obeys_a_no(make_daemon, tmp_path):
+    """Turbo has its own polkit action, so an admin can allow fans and
+    keyboard without allowing CPU changes. A refusal must write nothing."""
+    from conftest import Invocation
+
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import GLib
+
+    from gigactld import authz
+    from gigactld.service import INTERFACE
+    d = make_daemon()
+    knob = tmp_path / "no_turbo"
+    knob.write_text("1")
+    d.turbo = turbo_mod.TurboControl(str(knob))
+    d.authorizer = _RecordingAuthorizer(allow=False)
+    inv = Invocation()
+    d._method_call(None, ":1.9", None, INTERFACE, "SetTurboBoost",
+                   GLib.Variant("(b)", (True,)), inv)
+    assert d.authorizer.asked == [authz.ACTION_CONTROL_CPU]
+    assert inv.error is not None and inv.error[0].endswith("NotAuthorized")
+    assert knob.read_text() == "1", "a refused request must not touch the knob"
+
+
+def test_a_knob_the_user_never_set_is_never_written(make_daemon, tmp_path):
+    """Only a choice made through the daemon is re-applied. A saved state with
+    no turbo choice — every install before this feature, and every user who
+    never touched the switch — must leave the knob to tuned/PPD/the firmware,
+    at start and on every tick."""
+    import json
+    d = make_daemon()
+    knob = tmp_path / "no_turbo"
+    knob.write_text("1")
+    d.turbo = turbo_mod.TurboControl(str(knob))
+    open(d.state_path, "w").write(json.dumps(
+        {"profile": "firmware", "linked": True, "cpu": [], "gpu": []}))
+    before = knob.stat().st_mtime_ns
+    d._restore_saved_state()
+    for _ in range(3):
+        d._tick()
+    assert knob.stat().st_mtime_ns == before and knob.read_text() == "1"

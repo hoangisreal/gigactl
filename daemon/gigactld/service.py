@@ -281,12 +281,9 @@ class Daemon:
         if prop == "Curves":
             return _curves_variant(self.engine)
         if prop == "TurboAvailable":
-            return GLib.Variant("b", self.turbo.available())
+            return GLib.Variant("b", self.turbo.state()[0])
         if prop == "TurboBoost":
-            try:
-                return GLib.Variant("b", self.turbo.enabled())
-            except turbo.TurboUnavailable:
-                return GLib.Variant("b", False)
+            return GLib.Variant("b", self.turbo.state()[1])
         return None
 
     def ec_status(self) -> str:
@@ -458,11 +455,7 @@ class Daemon:
         power-profiles-daemon turns turbo off in Power Saver — and clients
         read a cached copy of the property, so without this the switch in the
         window would keep showing whatever it saw last."""
-        try:
-            enabled = self.turbo.enabled()
-        except turbo.TurboUnavailable:
-            enabled = False
-        current = (self.turbo.available(), enabled)
+        current = self.turbo.state()
         if current == self._last_turbo:
             return  # unchanged: re-announcing would wake every client for nothing
         self._last_turbo = current
