@@ -1,53 +1,40 @@
 #!/usr/bin/env python3
-"""Read-only EC register dump for the Phase-0 probe on Fedora.
+"""Read the temperature and fan registers three times. It never writes.
 
-Fedora's stock kernel sets CONFIG_ACPI_EC=y with CONFIG_ACPI_EC_DEBUGFS
-unset, so the ec_sys debugfs file gigactl prefers on Ubuntu never exists
-there. The only stock-kernel EC path is /dev/port, driven here through the
-daemon's own DevPortBackend — read methods only; this tool never writes.
+    sudo python3 tools/ec_read.py
 
-Usage (root):  sudo python3 tools/ec_read.py
+Each sample is the daemon's own telemetry read (gigactld.telemetry), so the
+registers are decoded exactly as gigactld decodes them, and all of them are
+read inside one EmbeddedController.transaction(). That holds the EC lock the
+daemon and gfan take, so a sample never interleaves with their commands.
+
+The EC backend is picked the way the daemon picks it: the ec_sys debugfs file
+when the kernel has it, /dev/port otherwise. Fedora's stock kernel has no
+ec_sys, so there it is /dev/port.
 """
 import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "daemon"))
 
-from gigactld.ec import DevPortBackend, EcError  # noqa: E402
+from gigactld.ec import EcError, EmbeddedController  # noqa: E402
+from gigactld.telemetry import read_telemetry  # noqa: E402
 
-REGISTERS = [
-    (0x07, "cpu_temp"),
-    (0x0A, "gpu_temp_a"),
-    (0x0B, "gpu_temp_b"),
-    (0xCE, "dut1"),
-    (0xCF, "dut2"),
-    (0xD0, "tach1_hi"),
-    (0xD1, "tach1_lo"),
-    (0xD2, "tach2_hi"),
-    (0xD3, "tach2_lo"),
-]
+SAMPLES = 3
 
 
-def main() -> int:
-    backend = DevPortBackend()
-    for samples in range(3):
-        values = {}
+def main(ec=None) -> int:
+    if ec is None:
+        ec = EmbeddedController()
+    for n in range(SAMPLES):
         try:
-            for offset, label in REGISTERS:
-                values[label] = backend.read(offset)
+            t = read_telemetry(ec)
         except (EcError, OSError) as exc:
-            print(f"ec_read: read failed on sample {samples}: {exc}")
+            print(f"ec_read: read failed on sample {n}: {exc}")
             return 1
-        tach1 = (values["tach1_hi"] << 8) | values["tach1_lo"]
-        tach2 = (values["tach2_hi"] << 8) | values["tach2_lo"]
-        rpm1 = round(2_156_220 / tach1) if tach1 else 0
-        rpm2 = round(2_156_220 / tach2) if tach2 else 0
-        print(
-            f"sample {samples}: cpu={values['cpu_temp']}C "
-            f"gpu={values['gpu_temp_a']}/{values['gpu_temp_b']}C "
-            f"dut1={values['dut1']} dut2={values['dut2']} "
-            f"rpm1~{rpm1} rpm2~{rpm2}"
-        )
+        print(f"sample {n}: cpu={t.cpu_temp}C gpu={t.gpu_temp}C "
+              f"dut1={t.fan1_duty_pct}% dut2={t.fan2_duty_pct}% "
+              f"rpm1~{t.fan1_rpm} rpm2~{t.fan2_rpm}")
     return 0
 
 

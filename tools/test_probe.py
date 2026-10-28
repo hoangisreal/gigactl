@@ -44,9 +44,17 @@ def test_daemon_smoke_always_restores_firmware():
     assert 'set_profile("firmware")' in tool
 
 
-def test_ec_read_tool_never_writes():
-    tool = pathlib.Path(__file__).with_name("ec_read.py").read_text()
-    assert ".write(" not in tool, "ec_read.py must only call backend.read"
-    assert "DevPortBackend" in tool
-    for off in ("0x07", "0x0A", "0xCE", "0xCF", "0xD0", "0xD3"):
-        assert off in tool
+def test_ec_read_reads_under_the_daemons_lock_and_never_writes(fake_ec, capsys):
+    """The probe's EC reader goes through the daemon's own telemetry read, so
+    every register is read inside a transaction — holding the lock the daemon
+    and gfan take — and nothing is written."""
+    import ec_read
+
+    fake_ec.regs.update({0x07: 43, 0x0A: 40, 0xCE: 71, 0xD0: 0x03, 0xD1: 0x8D})
+    assert ec_read.main(fake_ec) == 0
+    assert fake_ec.reads, "it should have read the telemetry registers"
+    assert fake_ec.unlocked == [], "every read must happen under the EC lock"
+    assert fake_ec.writes == []
+    assert capsys.readouterr().out.splitlines() == [
+        f"sample {n}: cpu=43C gpu=40C dut1=27% dut2=0% rpm1~2372 rpm2~0"
+        for n in range(3)]

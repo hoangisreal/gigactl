@@ -61,9 +61,9 @@ if [ "$(id -u)" != 0 ]; then
   echo '<skipped: re-run with sudo to read EC bytes>'
 elif [ ! -r "$EC_IO" ]; then
   echo "<$EC_IO not readable: ec_sys debugfs unavailable on this kernel>"
-  # Fedora stock kernels build ACPI EC in without the debugfs interface;
-  # fall back to brief read-only /dev/port transactions via the daemon's
-  # own backend. Reads only — this probe never writes.
+  # Fedora stock kernels build ACPI EC in without the debugfs interface, so
+  # fall back to /dev/port through the daemon's own telemetry read, which
+  # holds the daemon's EC lock. Reads only — this probe never writes.
   SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
   if [ -e /dev/port ] && command -v python3 >/dev/null; then
     python3 "$SCRIPT_DIR/ec_read.py" || echo '<ec_read.py via /dev/port failed>'
