@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from conftest import text
+from conftest import TEST_WORKFLOW, apt_installed, text
 
 MODEL_SOURCE = "gui/gigactl_gui/model.py"
 
@@ -40,3 +40,20 @@ def test_the_readme_verifies_exactly_the_machine_the_code_verifies():
     assert len(claimed) == 1, f"exactly one row may claim verification: {claimed}"
     assert verified in claimed[0], \
         f"README verifies {claimed[0]!r}, the code verifies {verified!r}"
+
+
+def _contributing_apt_packages() -> set[str]:
+    """The packages CONTRIBUTING.md tells a newcomer to apt install."""
+    joined = re.sub(r"\\\n", " ", text("CONTRIBUTING.md"))
+    lines = [line for line in joined.splitlines()
+             if re.search(r"\bapt(-get)? install\b", line)]
+    assert len(lines) == 1, f"expected one apt install line, got {lines}"
+    args = re.split(r"\bapt(?:-get)? install\b", lines[0], maxsplit=1)[1].split()
+    return {arg for arg in args if not arg.startswith("-")}
+
+
+def test_contributing_installs_everything_ci_installs():
+    """CI's package list is the one proven to run the tests. If CONTRIBUTING.md
+    falls behind it, a newcomer's first run fails in a way CI never shows."""
+    missing = apt_installed(TEST_WORKFLOW) - _contributing_apt_packages()
+    assert not missing, f"CONTRIBUTING.md's install line lacks {sorted(missing)}"

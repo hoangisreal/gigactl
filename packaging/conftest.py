@@ -181,38 +181,43 @@ def long_options(rel: str) -> set[str]:
     return set(re.findall(r'"(--[a-z][a-z-]*)"', text(rel)))
 
 
-# --- the release workflow ---------------------------------------------------
+# --- the workflows ----------------------------------------------------------
+#
+# The readers default to the release workflow, which is what test_release.py
+# reads; test_ci.py passes TEST_WORKFLOW.
 
 RELEASE_WORKFLOW = ".github/workflows/release.yml"
+TEST_WORKFLOW = ".github/workflows/test.yml"
 
 
-def workflow() -> dict:
-    """The release workflow, parsed. YAML reads bare ``on`` as True, so it is
-    normalised back to the string GitHub actually means."""
+def workflow(path: str = RELEASE_WORKFLOW) -> dict:
+    """A workflow, parsed. YAML reads bare ``on`` as True, so it is normalised
+    back to the string GitHub actually means."""
     import yaml
 
-    parsed = yaml.safe_load(text(RELEASE_WORKFLOW))
+    parsed = yaml.safe_load(text(path))
     if True in parsed:
         parsed["on"] = parsed.pop(True)
     return parsed
 
 
-def only_job() -> dict:
-    """The workflow's single job — there is one thing to do: build and attach."""
-    jobs = workflow()["jobs"]
+def only_job(path: str = RELEASE_WORKFLOW) -> dict:
+    """The workflow's single job. Each workflow has one thing to do: the release
+    builds and attaches, the test workflow runs the suites."""
+    jobs = workflow(path)["jobs"]
     assert len(jobs) == 1, f"expected one job, got {sorted(jobs)}"
     return next(iter(jobs.values()))
 
 
-def run_steps() -> list[tuple[str, str]]:
+def run_steps(path: str = RELEASE_WORKFLOW) -> list[tuple[str, str]]:
     """Every step that runs a shell script, as (name, script)."""
     return [(step.get("name", "<unnamed>"), step["run"])
-            for step in only_job()["steps"] if "run" in step]
+            for step in only_job(path)["steps"] if "run" in step]
 
 
-def workflow_shell() -> str:
+def workflow_shell(path: str = RELEASE_WORKFLOW) -> str:
     """All of the workflow's shell, concatenated — for 'is X done anywhere' checks."""
-    return "\n".join(script for _name, script in run_steps())
+    return "\n".join(script for _name, script in run_steps(path))
 
 
 def commands(script: str) -> str:
@@ -222,14 +227,19 @@ def commands(script: str) -> str:
                      if line.strip() and not line.strip().startswith("#"))
 
 
-def workflow_commands() -> str:
-    return "\n".join(commands(script) for _name, script in run_steps())
+def workflow_commands(path: str = RELEASE_WORKFLOW) -> str:
+    return "\n".join(commands(script) for _name, script in run_steps(path))
 
 
-def apt_installed() -> set[str]:
-    """Exact package names the workflow installs by hand (not via build-dep)."""
+def apt_installed(path: str = RELEASE_WORKFLOW) -> set[str]:
+    """Exact package names the workflow installs by hand (not via build-dep).
+
+    A long install line may be continued with a trailing backslash, so those
+    lines are joined first — otherwise every package after the first line break
+    would be invisible here.
+    """
     packages = set()
-    for line in workflow_commands().splitlines():
+    for line in re.sub(r"\\\n", " ", workflow_commands(path)).splitlines():
         if "apt-get install" not in line:
             continue
         args = line.split("apt-get install", 1)[1].split()

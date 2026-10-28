@@ -45,8 +45,8 @@ jobs:
         # The two suites that need no GTK stack: packaging/ reads debian/ the way
         # dpkg-buildpackage is about to, cli/ drives gfan and gkbd against stub
         # busctl and ec_probe. The daemon and GUI suites want python3-gi and the
-        # GTK4 typelibs; they run locally, and a broken .deb contract shows up
-        # here regardless.
+        # GTK4 typelibs; test.yml runs them on every pull request and push to
+        # master, and a broken .deb contract shows up here regardless.
         #
         # One invocation each, deliberately: both suites keep their readers in a
         # top-level conftest.py, so `pytest packaging cli` imports one as the

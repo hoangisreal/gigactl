@@ -1,0 +1,129 @@
+name: Hardware report
+description: Tell us if gigactl works on your laptop model. "It works" helps too.
+title: "Hardware report: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you! The maintainer owns one laptop, a G6 KF. Reports like this one are how we learn about every other model.
+
+        A report can earn your model a 👍 ("reported working by a user") in the README. Only models the maintainer has measured get ✅.
+
+        The commands this form asks you to paste only read, except the optional test at the end. The checkboxes name commands you may already have tried; those change settings, through the daemon, like the app does. None of the commands shows a serial number.
+
+  - type: textarea
+    id: dmi
+    attributes:
+      label: Laptop model and BIOS
+      description: |
+        Run this and paste the output:
+        `cat /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name /sys/class/dmi/id/bios_version`
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution
+      placeholder: Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel
+      description: The output of `uname -r`
+      placeholder: 6.8.0-45-generic
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install gigactl?
+      options:
+        - The .deb package
+        - install.sh, from a source checkout
+        - Another way (please say how below)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: gigactl version
+      description: For the .deb, `dpkg-query -W gigactl`. For a checkout, `git log -1 --oneline`.
+
+  - type: checkboxes
+    id: works
+    attributes:
+      label: What works?
+      description: Tick each thing you tried and saw working.
+      options:
+        - label: "Fans: `gfan 70` changes the speed, and `gfan auto` gives control back"
+        - label: "Keyboard colour: `gkbd red`"
+        - label: "Keyboard brightness: `gkbd brightness 40`"
+        - label: The app window (GigaControl)
+        - label: The tray icon
+
+  - type: textarea
+    id: problems
+    attributes:
+      label: What did not work?
+      description: What you did, and what happened. Please paste error messages as text. Leave this empty if everything worked.
+
+  - type: textarea
+    id: gfan-status
+    attributes:
+      label: Output of `gfan status`
+      description: Please paste it even if it is an error.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: ec-sys
+    attributes:
+      label: Output of `cat /sys/module/ec_sys/parameters/write_support`
+      description: |
+        `Y` means the kernel lets programs write to the Embedded Controller. `N`, or "No such file or directory", is a useful answer too: in #25, a read-only setting looked like broken hardware.
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ## Optional: the one-fan test
+
+        Skip this if you do not want to do it, or if you did not install the .deb. It helps answer an open question from #24: on some models, are the fan registers, or the fans themselves, the other way round? ("Open questions" in [docs/PROTOCOL.md](https://github.com/smairio/gigactl/blob/master/docs/PROTOCOL.md) has the details.)
+
+        The test sets fan 1 alone to 80 % through the gigactl daemon. The daemon checks the write, and gives the fan back to the firmware if the laptop refuses it. Run the commands in a terminal on the laptop itself.
+
+        1. Give both fans to the firmware first: `gfan auto`
+        2. Set fan 1 alone to 80 %:
+           ```
+           busctl --system call io.github.smairio.gigactl /io/github/smairio/gigactl io.github.smairio.gigactl.Control SetFanDuty uu 1 80
+           ```
+        3. Wait five seconds, and listen: which fan got louder?
+        4. Run `gfan status`. Its "Fan1" line reads register `0xCE`, and its "Fan2" line reads register `0xCF`.
+        5. When you are done, run `gfan auto` again, or choose your usual profile in the app.
+
+  - type: textarea
+    id: one-fan-status
+    attributes:
+      label: "One-fan test: `gfan status` from step 4"
+      description: If step 2 printed an error instead, paste the error.
+      render: text
+
+  - type: dropdown
+    id: one-fan-louder
+    attributes:
+      label: "One-fan test: which fan got louder in step 3?"
+      description: Left and right as you sit in front of the laptop.
+      options:
+        - The left fan
+        - The right fan
+        - Both fans
+        - I could not tell
