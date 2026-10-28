@@ -1,0 +1,51 @@
+name: Bug report
+description: Something in gigactl is broken, or does the wrong thing.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting this. If you want to tell us whether gigactl works on your laptop model at all, the **Hardware report** form fits better.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead. Please paste error messages as text, not as screenshots.
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Laptop model
+      description: The output of `cat /sys/class/dmi/id/product_name`
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: gigactl version, and how you installed it
+      description: For the .deb, `dpkg-query -W gigactl`. For a checkout, `git log -1 --oneline`.
+      placeholder: 1.0.2, from the .deb
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: Distribution and kernel
+      description: The kernel is the output of `uname -r`.
+      placeholder: Ubuntu 24.04, 6.8.0-45-generic
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output that might help
+      description: |
+        The output of `gfan status`. If the problem is in the app or the daemon, also the daemon's log:
+        `journalctl -b -u gigactl --no-pager | tail -n 50`
+      render: text
