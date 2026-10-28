@@ -22,9 +22,9 @@ serialising on the same lock the daemon uses. And when they *cannot tell* — no
 | Model | Status |
 |-------|--------|
 | Gigabyte **G6 KF** (i7-13620H / RTX 4060) | ✅ Verified — built and measured on this machine |
-| Gigabyte **G5 GE** (i5-12500H / RTX 3050) | ✅ Verified — fan control measured on this machine (BIOS FB06, 2026-10-26) |
 | Gigabyte **G5 KF** | 👍 Reported working by a user ([#24](https://github.com/smairio/gigactl/issues/24)) |
 | Gigabyte **G5 MF5** | 👍 Reported working by a user ([#25](https://github.com/smairio/gigactl/issues/25)) |
+| Gigabyte **G5 GE** (i5-12500H / RTX 3050) | 👍 Reported working by a user — measured with the scripts in `tools/` ([#36](https://github.com/smairio/gigactl/pull/36)) |
 | Other Gigabyte G5 / G6 / G7 (same Clevo platform) | 🟢 Expected to work — untested, please report! |
 | Any other Gigabyte laptop | ❌ Refused by the built-in model guard |
 
