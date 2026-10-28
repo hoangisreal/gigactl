@@ -1,5 +1,7 @@
 """Turbo Boost knob: sysfs reads/writes against a temp file, plus the
 daemon surface (property, authorized method, persistence choice)."""
+import os
+
 import pytest
 
 from gigactld import turbo as turbo_mod
@@ -76,3 +78,66 @@ def test_daemon_restore_applies_saved_turbo(make_daemon, tmp_path):
          "turbo_enabled": False}))
     d._restore_saved_state()
     assert knob_path.read_text() == "1"
+
+
+# --- clients see the live knob, whoever moved it ------------------------------
+
+def _announced(d, prop):
+    """The last value of ``prop`` the daemon announced via PropertiesChanged."""
+    for _iface, signal, params in reversed(d._conn.emissions):
+        if signal == "PropertiesChanged" and prop in params[1]:
+            return params[1][prop]
+    return None
+
+
+def test_a_change_made_elsewhere_reaches_clients(make_daemon, tmp_path):
+    """power-profiles-daemon writes the same knob — Power Saver turns turbo
+    off. Clients read a cached copy of the property, so unless the daemon
+    announces the change the switch in the window shows the old state."""
+    d = make_daemon()
+    d.turbo = _knob(tmp_path, "0")
+    d._tick()
+    (tmp_path / "no_turbo").write_text("1")  # someone else turned turbo off
+    d._tick()
+    assert _announced(d, "TurboBoost") is False
+
+
+def test_a_steady_knob_is_not_announced_every_tick(make_daemon, tmp_path):
+    """The tick runs every two seconds. Re-announcing an unchanged value would
+    wake every client for nothing."""
+    d = make_daemon()
+    d.turbo = _knob(tmp_path, "0")
+    d._tick()
+
+    def turbo_announcements():
+        return sum(1 for _i, s, p in d._conn.emissions
+                   if s == "PropertiesChanged" and "TurboBoost" in p[1])
+
+    before = turbo_announcements()
+    d._tick()
+    d._tick()
+    assert turbo_announcements() == before
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only file")
+def test_turbo_locked_by_the_firmware_is_explained_in_words(make_daemon, tmp_path):
+    """The kernel refuses to turn turbo on when the BIOS has switched it off.
+    The user should read why, not an errno — the lesson of #25. (A read-only
+    file stands in for the kernel's refusal: both raise PermissionError.)"""
+    from conftest import Invocation
+
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import GLib
+
+    from gigactld.service import INTERFACE
+    d = make_daemon()
+    knob = tmp_path / "no_turbo"
+    knob.write_text("1")
+    knob.chmod(0o444)
+    d.turbo = turbo_mod.TurboControl(str(knob))
+    inv = Invocation()
+    d._method_call(None, ":1.9", None, INTERFACE, "SetTurboBoost",
+                   GLib.Variant("(b)", (True,)), inv)
+    assert inv.error is not None
+    assert "BIOS" in inv.error[1] and "Errno" not in inv.error[1], inv.error

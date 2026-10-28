@@ -129,6 +129,8 @@ class Daemon:
         # made choice is persisted and re-applied at boot, so a machine
         # managed by tuned/systemd alone is never fought by the daemon.
         self._turbo_choice: bool | None = None
+        # (available, enabled) as last announced; see _sync_turbo.
+        self._last_turbo: tuple[bool, bool] | None = None
         self.state_path = state.DEFAULT_PATH
         # Why the engine's last attempt to drive the fans came to nothing, and
         # the status last announced — kept so a condition repeating every two
@@ -447,8 +449,26 @@ class Daemon:
             self._run_engine(t.cpu_temp, t.gpu_temp, quiet=True)
         except Exception as exc:
             print(f"gigactld: tick failed: {exc}", flush=True)
+        self._sync_turbo()
         self._sync_ec_status()
         return True  # keep the timeout running
+
+    def _sync_turbo(self) -> None:
+        """Announce the live turbo state. The knob has other writers —
+        power-profiles-daemon turns turbo off in Power Saver — and clients
+        read a cached copy of the property, so without this the switch in the
+        window would keep showing whatever it saw last."""
+        try:
+            enabled = self.turbo.enabled()
+        except turbo.TurboUnavailable:
+            enabled = False
+        current = (self.turbo.available(), enabled)
+        if current == self._last_turbo:
+            return  # unchanged: re-announcing would wake every client for nothing
+        self._last_turbo = current
+        self._notify_properties(
+            TurboAvailable=GLib.Variant("b", current[0]),
+            TurboBoost=GLib.Variant("b", current[1]))
 
     def _run_engine(self, cpu_temp: int, gpu_temp: int, *,
                     quiet: bool = False) -> None:
@@ -533,7 +553,7 @@ class Daemon:
             return
         self._turbo_choice = enabled
         self._persist()
-        self._notify_properties(TurboBoost=GLib.Variant("b", enabled))
+        self._sync_turbo()  # announce what the knob says now, not what was asked
         invocation.return_value(None)
 
     # --- keyboard methods ----------------------------------------------------

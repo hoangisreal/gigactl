@@ -26,6 +26,13 @@ current temperature. It also remembers the fan profile, the custom curves and th
 keyboard colour and brightness, re\-applying them at boot and after resume from
 suspend.
 .PP
+On Intel machines it can also allow or forbid CPU turbo boost, through the
+intel_pstate
+.I no_turbo
+switch. That switch has other writers \(em the desktop's power mode turns turbo
+off in power saver \(em so the daemon reports its live value and re\-applies its
+own saved choice only at start, never on a timer, and only if the user made one.
+.PP
 Every write is authorised through polkit before it happens, using the caller's
 bus name as the subject. The shipped policy allows the user of the active local
 session to control the fans and backlight without a password, and requires
@@ -77,16 +84,19 @@ Methods:
 .BR SetProfile ,
 .BR SetCurve ,
 .BR SetKeyboardColor ,
-.B SetKeyboardBrightness
+.BR SetKeyboardBrightness ,
+.B SetKeyboardEnabled
 and
-.BR SetKeyboardEnabled .
+.BR SetTurboBoost .
 Properties:
 .BR DaemonVersion ,
 .BR ActiveProfile ,
 .BR Telemetry ,
-.B KeyboardState
+.BR KeyboardState ,
+.BR Curves ,
+.B TurboBoost
 and
-.BR Curves .
+.BR TurboAvailable .
 Reading is unrestricted; every method is gated by polkit.
 .PP
 .RS

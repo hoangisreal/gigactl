@@ -27,7 +27,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
-from . import palette, profiles, temperature  # noqa: E402
+from . import palette, profiles, temperature, turbo  # noqa: E402
 from .client import DaemonClient, Telemetry  # noqa: E402
 from .curve_page import CurvePage  # noqa: E402
 from .gauge import TempGauge  # noqa: E402
@@ -93,7 +93,6 @@ class OverviewWindow(Adw.ApplicationWindow):
         content.append(self._build_profiles())
         content.append(Gtk.Separator())
         content.append(self._build_turbo())
-        content.append(Gtk.Separator())
         content.append(self._build_keyboard())
 
         clamp = Adw.Clamp(maximum_size=820, child=content)
@@ -272,25 +271,32 @@ class OverviewWindow(Adw.ApplicationWindow):
     def _build_turbo(self) -> Gtk.Box:
         self._turbo_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
         self._turbo_switch.set_tooltip_text(
-            "Allow the CPU to boost above its base clock")
+            "Let the CPU run faster than its base speed for short bursts")
         self._turbo_switch.connect("notify::active", self._on_turbo_toggled)
-        self._controls.append(self._turbo_switch)
-        self._turbo_note = Gtk.Label(xalign=1.0, hexpand=True,
-                                     halign=Gtk.Align.END)
-        self._turbo_note.add_css_class("metric-sub")
+        # Deliberately not in self._controls: _update_sensitivity would switch
+        # it on for a machine without turbo. _update_turbo decides instead.
+        title = _section_title("CPU turbo boost")
+        title.set_hexpand(True)
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        header.append(_section_title("CPU turbo boost"))
-        header.append(self._turbo_note)
+        header.append(title)
         header.append(self._turbo_switch)
         hint = Gtk.Label(
-            label="Off caps the CPU at base clock — cooler and quieter, "
-                  "slower in short bursts.",
+            label="Off keeps the CPU at its base speed: cooler and quieter, "
+                  "but slower in short bursts. Your system's power mode can "
+                  "change this too.",
             xalign=0.0, wrap=True)
         hint.add_css_class("metric-sub")
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        box.append(header)
-        box.append(hint)
-        return box
+        section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        section.append(header)
+        section.append(hint)
+        # The section owns the separator below it, so a machine without turbo
+        # (where the whole thing is hidden) is not left with a double line.
+        self._turbo_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                  spacing=16)
+        self._turbo_box.append(section)
+        self._turbo_box.append(Gtk.Separator())
+        self._turbo_box.set_visible(False)  # until the daemon says it exists
+        return self._turbo_box
 
     def _build_keyboard(self) -> Gtk.Box:
         self._switch = Gtk.Switch(valign=Gtk.Align.CENTER)
@@ -471,15 +477,7 @@ class OverviewWindow(Adw.ApplicationWindow):
                 else:
                     self._custom_button.remove_css_class("chosen")
             self._curve_page.sync_from_daemon()
-            turbo = self._client.turbo_state()
-            if turbo is not None:
-                available, enabled = turbo
-                self._turbo_switch.set_active(enabled)
-                self._turbo_switch.set_sensitive(
-                    available and self._client.available
-                    and self._model.support is not Support.UNSUPPORTED)
-                self._turbo_note.set_text(
-                    "" if available else "not available on this CPU")
+            self._update_turbo()
             keyboard = self._client.keyboard_state()
             if keyboard:
                 self._switch.set_active(keyboard.enabled)
@@ -543,14 +541,30 @@ class OverviewWindow(Adw.ApplicationWindow):
             self._show_waiting()
         self._update_sensitivity()
 
-    def _update_sensitivity(self) -> None:
+    def _controls_usable(self) -> bool:
         """Controls need a daemon to talk to, and an unsupported machine must
         not be written to at all (DESIGN.md / PRODUCT.md safety invariants)."""
         supported = self._model.support is not Support.UNSUPPORTED
-        usable = supported and self._client.available
+        return supported and self._client.available
+
+    def _update_sensitivity(self) -> None:
+        usable = self._controls_usable()
         for widget in self._controls:
             widget.set_sensitive(usable)
         self._curve_page.set_controls_sensitive(usable)
+        self._update_turbo()
+
+    def _update_turbo(self) -> None:
+        """Show, lock and set the turbo row from the daemon's live state. Moving
+        the switch fires the same signal a click does, hence the guard."""
+        state = turbo.row(self._client.turbo_state(), self._controls_usable())
+        self._turbo_box.set_visible(state.visible)
+        self._turbo_switch.set_sensitive(state.sensitive)
+        syncing, self._syncing = self._syncing, True
+        try:
+            self._turbo_switch.set_active(state.active)
+        finally:
+            self._syncing = syncing
 
     def show_error(self, message: str) -> None:
         """A refused or rejected write surfaces inline, never silently — and the
